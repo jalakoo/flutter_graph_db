@@ -1,0 +1,16 @@
+name: graph_db_core
+description: >-
+  Core engine of the Flutter-native graph database — CSR storage, property
+  store, indexes, overlay, applicator, public API, GQL parser/planner/
+  executor. Depends on nothing platform-specific.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies: {}
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^4.0.0

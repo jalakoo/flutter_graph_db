@@ -1,0 +1,13 @@
+# Shared lint baseline for every package in flutter_graph_db.
+# Sub-packages `include: ../../analysis_options.yaml` and may layer
+# additional rules.
+include: package:lints/recommended.yaml
+
+linter:
+  rules:
+    # Hot-path code prioritises explicit loops over functional sugar.
+    prefer_foreach: false
+    # Mutable per-isolate state is core to the design (§2.3); the lint
+    # noise it generates is not actionable here.
+    prefer_const_constructors: false
+    prefer_const_declarations: false
