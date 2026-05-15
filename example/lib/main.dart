@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:graph_db_core/samples.dart';
 
 import 'src/app.dart';
 import 'src/db_scope.dart';
+import 'src/repository/graph_repository.dart';
 
-void main() {
-  // Phase 1: the graph is built synchronously from a hand-written
-  // fixture. Future phases load it from a WAL on disk, in which case
-  // this is where the `await GraphDb.open(...)` happens behind a
-  // splash / loading state.
-  final social = SocialGraph.build();
-  runApp(DbScope(social: social, child: const ExampleApp()));
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Read the persisted snapshot if there is one; otherwise seed from
+  // the social-graph fixture. Async because path_provider hits the
+  // platform channel to resolve the documents directory.
+  final repo = await GraphRepository.open();
+  runApp(DbScope(repository: repo, child: const ExampleApp()));
 }

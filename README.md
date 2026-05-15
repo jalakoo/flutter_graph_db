@@ -24,10 +24,17 @@ cd ../../example
 flutter pub get && flutter run
 ```
 
-41 unit tests in `graph_db_core` + 5 widget tests + 1 on-device
+41 unit tests in `graph_db_core` + 15 widget / unit tests + 1 on-device
 integration test in `example/`. The example app ships four tabs —
 People, Companies, **Graph** (force-directed node-link view via
-`package:graphview`), Stats.
+`package:graphview`), Stats — with detail screens for both Persons and
+Companies, **add / edit / delete / reset** across nodes and edges
+(`knows` / `worksAt` / `founded`), and JSON snapshot persistence to the
+app documents directory. The Graph tab re-keys its layout when the
+user re-enters it after the underlying data has changed.
+
+Production WAL persistence is Phase 2 — the JSON snapshot layer here is
+an example-only stand-in.
 
 ## Layout
 

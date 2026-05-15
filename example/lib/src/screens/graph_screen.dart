@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:graph_db_core/graph_db_core.dart';
-import 'package:graph_db_core/samples.dart';
 import 'package:graphview/GraphView.dart';
 
+import '../data/engine_view.dart';
 import '../db_scope.dart';
+import '../graph_layout/non_overlap_algorithm.dart';
+import 'company_detail_screen.dart';
 import 'person_detail_screen.dart';
 
 /// Interactive node-link view of the whole graph. Force-directed layout
@@ -19,29 +21,38 @@ class GraphScreen extends StatefulWidget {
 
 class _GraphScreenState extends State<GraphScreen> {
   Graph? _graph;
-  SocialGraph? _sg;
+  EngineView? _view;
   late FruchtermanReingoldAlgorithm _algorithm;
 
   @override
   void initState() {
     super.initState();
-    _algorithm = FruchtermanReingoldAlgorithm(
-      FruchtermanReingoldConfiguration(iterations: 1000),
+    // Use the non-overlap subclass: force-directed positioning *then*
+    // a deterministic AABB-separation pass. Guarantees no two node
+    // rects overlap in the final layout — see
+    // graph_layout/non_overlap_algorithm.dart.
+    _algorithm = NonOverlapFruchtermanReingoldAlgorithm(
+      FruchtermanReingoldConfiguration(
+        iterations: 1000,
+        clusterPadding: 24,
+      ),
+      padding: 24,
     );
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // The fixture is built once and never replaced; build the visual
-    // graph here (the inherited widget isn't available in initState).
-    if (_graph != null) return;
-    final sg = DbScope.of(context);
-    _sg = sg;
-    _graph = _buildGraph(sg, context);
+    // Rebuild the visual graph whenever the repository commits a
+    // mutation — `EngineView` instances are fresh per commit, so a
+    // reference check is enough to skip no-op rebuilds.
+    final view = DbScope.of(context);
+    if (identical(view, _view) && _graph != null) return;
+    _view = view;
+    _graph = _buildGraph(view, context);
   }
 
-  Graph _buildGraph(SocialGraph sg, BuildContext context) {
+  Graph _buildGraph(EngineView sg, BuildContext context) {
     final db = sg.db;
     final scheme = Theme.of(context).colorScheme;
     final g = Graph()..isTree = false;
@@ -72,7 +83,7 @@ class _GraphScreenState extends State<GraphScreen> {
     return g;
   }
 
-  Color _edgeColor(int type, SocialGraph sg, ColorScheme scheme) {
+  Color _edgeColor(int type, EngineView sg, ColorScheme scheme) {
     if (type == sg.knowsEdge) return scheme.primary;
     if (type == sg.worksAtEdge) return scheme.tertiary;
     if (type == sg.foundedEdge) return scheme.error;
@@ -82,7 +93,7 @@ class _GraphScreenState extends State<GraphScreen> {
   @override
   Widget build(BuildContext context) {
     final graph = _graph;
-    final sg = _sg;
+    final sg = _view;
     if (graph == null || sg == null) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
@@ -123,7 +134,7 @@ class _GraphScreenState extends State<GraphScreen> {
 /// One node rendered as either a Person avatar or a Company chip.
 class _NodeWidget extends StatelessWidget {
   final Vid vid;
-  final SocialGraph sg;
+  final EngineView sg;
   const _NodeWidget({required this.vid, required this.sg});
 
   @override
@@ -154,15 +165,11 @@ class _NodeWidget extends StatelessWidget {
     }
 
     // Company
-    final foundedYear = db.getNodeIntProp(vid, sg.foundedYearKey);
     return _NodeButton(
       onTap: () {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(SnackBar(
-            content: Text('$name · founded $foundedYear'),
-            duration: const Duration(seconds: 2),
-          ));
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => CompanyDetailScreen(vid: vid)),
+        );
       },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -209,7 +216,7 @@ class _NodeButton extends StatelessWidget {
 }
 
 class _Legend extends StatelessWidget {
-  final SocialGraph sg;
+  final EngineView sg;
   const _Legend({required this.sg});
 
   @override

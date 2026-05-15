@@ -66,10 +66,19 @@ class Csr {
 
   /// Builds a CSR from a flat edge list plus per-node labels.
   ///
-  /// `eid` is assigned as the original index in the edge list. `srcs`,
-  /// `dsts`, and `edgeTypes` must all have the same length. `labelOf`
-  /// must have length `nodeCount`, `labelCount` is the number of
-  /// distinct label ids in use.
+  /// `eid` defaults to the input index — pass [eids] (same length as
+  /// [srcs]) to use a different mapping, which is what callers do when
+  /// they've already filtered out tombstoned edges but want the
+  /// surviving entries to keep their original eids.
+  ///
+  /// [nodeTombstones] (optional, length `nodeCount`): bytes with `1`
+  /// mark a vid as deleted — it is excluded from [labelIndex] but its
+  /// row remains addressable so previously-issued [Vid] handles do not
+  /// silently rebind to a different node. `null` ⇒ no tombstones.
+  ///
+  /// `srcs`, `dsts`, and `edgeTypes` must all have the same length.
+  /// `labelOf` must have length `nodeCount`. `labelCount` is the number
+  /// of distinct label ids in use.
   factory Csr.fromEdges({
     required int nodeCount,
     required Uint32List srcs,
@@ -77,6 +86,8 @@ class Csr {
     required Uint32List edgeTypes,
     required Uint32List labelOf,
     required int labelCount,
+    Uint32List? eids,
+    Uint8List? nodeTombstones,
   }) {
     final edgeCount = srcs.length;
     if (dsts.length != edgeCount || edgeTypes.length != edgeCount) {
@@ -84,9 +95,17 @@ class Csr {
           'srcs/dsts/edgeTypes must have the same length; '
           'got ${srcs.length} / ${dsts.length} / ${edgeTypes.length}');
     }
+    if (eids != null && eids.length != edgeCount) {
+      throw ArgumentError(
+          'eids length ${eids.length} != edge count $edgeCount');
+    }
     if (labelOf.length != nodeCount) {
       throw ArgumentError(
           'labelOf length ${labelOf.length} != nodeCount $nodeCount');
+    }
+    if (nodeTombstones != null && nodeTombstones.length != nodeCount) {
+      throw ArgumentError(
+          'nodeTombstones length ${nodeTombstones.length} != nodeCount $nodeCount');
     }
 
     // ----- forward
@@ -106,7 +125,7 @@ class Csr {
       final s = srcs[i];
       final pos = rowPtrOut[s] + cursorOut[s];
       colIdxOut[pos] = dsts[i];
-      edgeIdOut[pos] = i;
+      edgeIdOut[pos] = eids?[i] ?? i;
       edgeTypeOut[pos] = edgeTypes[i];
       cursorOut[s]++;
     }
@@ -128,14 +147,15 @@ class Csr {
       final d = dsts[i];
       final pos = rowPtrIn[d] + cursorIn[d];
       colIdxIn[pos] = srcs[i]; // reverse: parent at this position
-      edgeIdIn[pos] = i;
+      edgeIdIn[pos] = eids?[i] ?? i;
       edgeTypeIn[pos] = edgeTypes[i];
       cursorIn[d]++;
     }
 
-    // ----- label index
+    // ----- label index (tombstoned vids are excluded)
     final counts = Uint32List(labelCount);
     for (var v = 0; v < nodeCount; v++) {
+      if (nodeTombstones != null && nodeTombstones[v] != 0) continue;
       counts[labelOf[v]]++;
     }
     final labelIndex = <int, Uint32List>{};
@@ -144,6 +164,7 @@ class Csr {
     }
     final fill = Uint32List(labelCount);
     for (var v = 0; v < nodeCount; v++) {
+      if (nodeTombstones != null && nodeTombstones[v] != 0) continue;
       final l = labelOf[v];
       labelIndex[l]![fill[l]++] = v;
     }

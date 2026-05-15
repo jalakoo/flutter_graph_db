@@ -1,29 +1,35 @@
 import 'package:flutter/widgets.dart';
-import 'package:graph_db_core/graph_db_core.dart';
-import 'package:graph_db_core/samples.dart';
 
-/// Inherited widget exposing the [SocialGraph] (and the [GraphDb] inside
-/// it) to the widget tree. The fixture is built once in `main` and
-/// stays constant for the lifetime of the app, so plain
-/// [InheritedWidget] is enough — no notifier needed.
-class DbScope extends InheritedWidget {
-  final SocialGraph social;
+import 'data/engine_view.dart';
+import 'repository/graph_repository.dart';
 
+/// Inherited notifier exposing the [GraphRepository] (and the live
+/// [EngineView] / [GraphDb] inside it) to the widget tree. Every
+/// mutation calls `notifyListeners()` on the repo, which propagates
+/// through here to dependent widgets.
+class DbScope extends InheritedNotifier<GraphRepository> {
   const DbScope({
     super.key,
-    required this.social,
+    required GraphRepository repository,
     required super.child,
-  });
+  }) : super(notifier: repository);
 
-  GraphDb get db => social.db;
+  GraphRepository get repository => notifier!;
 
-  static SocialGraph of(BuildContext context) {
+  /// Read-side handle for screens that only display data. Subscribing
+  /// to this rebuilds the calling widget when the repository commits.
+  static EngineView of(BuildContext context) {
     final scope = context.dependOnInheritedWidgetOfExactType<DbScope>();
     assert(scope != null, 'DbScope.of called outside the DbScope subtree');
-    return scope!.social;
+    return scope!.repository.view;
   }
 
-  @override
-  bool updateShouldNotify(DbScope oldWidget) =>
-      !identical(oldWidget.social, social);
+  /// Mutation-side handle. Subscribes the calling widget too (Flutter's
+  /// pattern: any code path that depends on the inherited widget should
+  /// participate in the dependency, so a stale handle never lingers).
+  static GraphRepository repositoryOf(BuildContext context) {
+    final scope = context.dependOnInheritedWidgetOfExactType<DbScope>();
+    assert(scope != null, 'DbScope.repositoryOf called outside DbScope');
+    return scope!.repository;
+  }
 }

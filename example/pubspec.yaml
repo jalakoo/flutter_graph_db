@@ -44,6 +44,11 @@ dependencies:
   # naturally.
   graphview: ^1.2.0
 
+  # JSON snapshot persistence — example-only stand-in for the eventual
+  # graph_db_wal (CBOR + framing) package, plan §6. Lets the example
+  # show add/edit/delete that survives an app restart.
+  path_provider: ^2.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

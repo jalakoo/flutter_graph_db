@@ -3,8 +3,8 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter_graph_db_example/src/app.dart';
 import 'package:flutter_graph_db_example/src/db_scope.dart';
+import 'package:flutter_graph_db_example/src/repository/graph_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:graph_db_core/samples.dart';
 import 'package:integration_test/integration_test.dart';
 
 /// On-device integration test for the example app.
@@ -17,7 +17,7 @@ import 'package:integration_test/integration_test.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('example app boots and exercises all three tabs',
+  testWidgets('example app boots and exercises all four tabs',
       (tester) async {
     final platform = Platform.isIOS
         ? 'iOS'
@@ -26,9 +26,9 @@ void main() {
             : Platform.operatingSystem;
     debugPrint('graph_db_core example on $platform');
 
-    final social = SocialGraph.build();
+    final repo = GraphRepository.inMemory();
     await tester.pumpWidget(
-      DbScope(social: social, child: const ExampleApp()),
+      DbScope(repository: repo, child: const ExampleApp()),
     );
     await tester.pumpAndSettle();
 
@@ -56,7 +56,7 @@ void main() {
     // Stats tab — node + edge counts match the fixture.
     await tester.tap(find.byIcon(Icons.analytics_outlined));
     await tester.pumpAndSettle();
-    expect(find.text('${social.db.nodeCount}'), findsOneWidget);
-    expect(find.text('${social.db.edgeCount}'), findsOneWidget);
+    expect(find.text('${repo.db.nodeCount}'), findsOneWidget);
+    expect(find.text('${repo.db.edgeCount}'), findsOneWidget);
   });
 }

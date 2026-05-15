@@ -34,6 +34,14 @@ class MutableGraphState {
   /// `labelNames` and `edgeTypeNames` are interned up front so the
   /// `labelOf` and `edgeTypes` arrays can be filled with the resulting
   /// ids by the caller.
+  ///
+  /// [eids] and [nodeTombstones] are forwarded to [Csr.fromEdges] —
+  /// callers that filter deleted entries from `srcs`/`dsts` while keeping
+  /// the original vid/eid numbering use these.
+  ///
+  /// [vidSpace] / [eidSpace] override the size of the underlying property
+  /// stores. Defaults track the input but allow headroom for growth
+  /// (handy for example apps that mutate after loading a fixture).
   factory MutableGraphState.fromFixture({
     required int nodeCount,
     required Uint32List srcs,
@@ -42,6 +50,10 @@ class MutableGraphState {
     required Uint32List labelOf,
     required List<String> labelNames,
     required List<String> edgeTypeNames,
+    Uint32List? eids,
+    Uint8List? nodeTombstones,
+    int? vidSpace,
+    int? eidSpace,
   }) {
     final strings = StringInterner();
     for (final name in labelNames) {
@@ -57,12 +69,19 @@ class MutableGraphState {
       edgeTypes: edgeTypes,
       labelOf: labelOf,
       labelCount: labelNames.length,
+      eids: eids,
+      nodeTombstones: nodeTombstones,
     );
+    final effectiveVidSpace = vidSpace ?? nodeCount;
+    final effectiveEidSpace = eidSpace ??
+        (eids != null && eids.isNotEmpty
+            ? (eids.reduce((a, b) => a > b ? a : b) + 1)
+            : csr.edgeCount);
     return MutableGraphState(
       strings: strings,
       csr: csr,
-      nodeProps: PropertyStore(vidSpace: nodeCount),
-      edgeProps: PropertyStore(vidSpace: csr.edgeCount),
+      nodeProps: PropertyStore(vidSpace: effectiveVidSpace),
+      edgeProps: PropertyStore(vidSpace: effectiveEidSpace),
     );
   }
 
