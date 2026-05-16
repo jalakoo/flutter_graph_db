@@ -1,0 +1,94 @@
+# Cross-platform CI for the flutter_graph_db monorepo (plan §14 Phase 0 #10).
+#
+# Matrix: Ubuntu + Windows + macOS. Each runner:
+#   1. Resolves all Dart packages.
+#   2. Runs `dart analyze` + `dart test` per pure-Dart package.
+#   3. Runs `flutter analyze` + `flutter build web --release` for the
+#      example app (Wasm dry-run on Linux only — it's the slowest leg
+#      and dart2wasm is platform-independent).
+#
+# NOTE: This workflow has NOT been run yet — it is scaffolded
+# blind and will be validated on first push. Adjust the SDK / Flutter
+# channel + Linux-only Wasm gate once the first matrix run reports.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same branch — keeps the matrix lean
+# while iterating on a PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter (stable)
+        # Pulls the matching Dart SDK transitively. Stable channel is
+        # the floor the plan pins (Dart 3.5+).
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          dart --version
+
+      # --- Pure-Dart packages: analyze + test ----------------------------
+      # Each package is independent; `dart pub get` per pkg keeps the
+      # `_test.dart` resolution scope tight and surfaces missing deps.
+
+      - name: graph_db_core
+        working-directory: packages/graph_db_core
+        run: |
+          dart pub get
+          dart analyze
+          dart test
+
+      - name: graph_db_wal
+        working-directory: packages/graph_db_wal
+        run: |
+          dart pub get
+          dart analyze
+          dart test
+
+      - name: graph_db_bench
+        working-directory: packages/graph_db_bench
+        run: |
+          dart pub get
+          dart analyze
+          dart test
+
+      # --- Flutter example: analyze + web build --------------------------
+      # Web build is the canary for plan §11 (web is a soft requirement
+      # but a hard compile constraint — no native-only imports may leak
+      # into the umbrella exports).
+
+      - name: example — analyze + web
+        working-directory: example
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter build web --release
+
+      - name: example — wasm (linux only)
+        # dart2wasm output is platform-independent; one runner is
+        # enough. Linux is the cheapest runner.
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: example
+        run: flutter build web --wasm --release

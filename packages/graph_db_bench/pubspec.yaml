@@ -1,0 +1,20 @@
+name: graph_db_bench
+description: >-
+  Dev-only benchmark harness for graph_db_core. R-MAT fixture, hub-seed
+  traversal selection, latency percentiles, JIT GC-event signal, and the
+  Phase-1 read workloads from plan §15. Mirrors SPIKE_A's shape so
+  results are directly comparable to the spike record.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  graph_db_core:
+    path: ../graph_db_core
+  vm_service: ">=11.0.0 <16.0.0"
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^4.0.0

@@ -1,0 +1,24 @@
+name: graph_db_remote_neo4j
+description: >-
+  Bolt-over-Dart adapter for Neo4j (plan §9.1). Separate package so
+  consumers only pull in the Bolt dependency when actually targeting
+  Neo4j. Stub — implementation lands in Phase 4.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  graph_db_core:
+    path: ../graph_db_core
+  graph_db_remote:
+    path: ../graph_db_remote
+  # Bolt client choice deferred — per the §13 audit, an existing
+  # community client gets validated in Phase 4 against a real Neo4j 5.x;
+  # if none is production-quality, the package ports the minimal Bolt
+  # subset (~2 weeks of work).
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^4.0.0

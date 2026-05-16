@@ -81,6 +81,19 @@ final class PropList extends PropValue {
   const PropList(this.values);
 
   @override
+  bool operator ==(Object other) {
+    if (other is! PropList) return false;
+    if (other.values.length != values.length) return false;
+    for (var i = 0; i < values.length; i++) {
+      if (other.values[i] != values[i]) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hashAll(values);
+
+  @override
   String toString() => 'PropList($values)';
 }
 
@@ -89,6 +102,23 @@ final class PropList extends PropValue {
 final class PropMap extends PropValue {
   final Map<String, PropValue> values;
   const PropMap(this.values);
+
+  @override
+  bool operator ==(Object other) {
+    if (other is! PropMap) return false;
+    if (other.values.length != values.length) return false;
+    for (final e in values.entries) {
+      final v = other.values[e.key];
+      if (v == null && !other.values.containsKey(e.key)) return false;
+      if (v != e.value) return false;
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hashAllUnordered(
+        values.entries.map((e) => Object.hash(e.key, e.value)),
+      );
 
   @override
   String toString() => 'PropMap($values)';

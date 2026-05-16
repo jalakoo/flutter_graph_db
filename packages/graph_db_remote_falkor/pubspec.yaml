@@ -1,0 +1,22 @@
+name: graph_db_remote_falkor
+description: >-
+  RESP-over-Dart adapter for FalkorDB (plan §9.1). Separate package so
+  consumers only pull in the Redis dependency when actually targeting
+  FalkorDB. Stub — implementation lands in Phase 4.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  graph_db_core:
+    path: ../graph_db_core
+  graph_db_remote:
+    path: ../graph_db_remote
+  # RESP client choice deferred — per the §13 audit, `package:redis` is
+  # the candidate; minimal RESP port (~1 week) is the fallback.
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^4.0.0

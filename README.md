@@ -1,5 +1,7 @@
 # flutter_graph_db
 
+[![ci](https://github.com/jalakoo/flutter_graph_db/actions/workflows/ci.yaml/badge.svg)](https://github.com/jalakoo/flutter_graph_db/actions/workflows/ci.yaml)
+
 A pure-Dart, Flutter-native embedded graph database — the implementation
 of `4_PLAN.md`. See that document for the master plan, priorities, and
 the spike validation record that underpins every architectural decision
@@ -24,8 +26,8 @@ cd ../../example
 flutter pub get && flutter run
 ```
 
-41 unit tests in `graph_db_core` + 15 widget / unit tests + 1 on-device
-integration test in `example/`. The example app ships four tabs —
+41 unit tests in `graph_db_core` + 3 tests in `graph_db_bench` +
+15 widget / unit tests + 1 on-device integration test in `example/`. The example app ships four tabs —
 People, Companies, **Graph** (force-directed node-link view via
 `package:graphview`), Stats — with detail screens for both Persons and
 Companies, **add / edit / delete / reset** across nodes and edges
@@ -49,8 +51,8 @@ flutter_graph_db/
     graph_db_remote_neo4j/         ← Bolt adapter                       (Phase 4)
     graph_db_remote_falkor/        ← RESP adapter                       (Phase 4)
     graph_db_sync/                 ← Sync engine                        (Phase 7)
-    graph_db_bench/                ← R-MAT fixtures + read bench       (next)
-  device_runner/                   ← Flutter wrapper for iOS testing   (next)
+    graph_db_bench/                ← R-MAT + Phase-1 read bench harness
+  example/                        ← Flutter demo app (iOS / Android / desktop)
 ```
 
 The split follows plan §12 — `graph_db_core` is the only package the

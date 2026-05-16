@@ -1,0 +1,89 @@
+import 'dart:async';
+import 'dart:typed_data';
+
+import 'package:graph_db_core/graph_db_core.dart';
+
+import 'wal_store.dart';
+
+/// In-memory [WalStore] adapter. Used for tests, on web (until the
+/// IndexedDB adapter lands in Phase 8), and as the in-memory fixture
+/// the integration suite uses for crash-injection and recovery tests
+/// without touching disk (plan §2.2).
+class InMemoryWalStore implements WalStore {
+  final List<Uint8List> _chunks = [];
+  int _length = 0;
+  int _truncatedBefore = 0;
+  bool _closed = false;
+
+  InMemoryWalStore();
+
+  @override
+  Future<void> append(
+    Uint8List bytes, {
+    required Durability durability,
+  }) async {
+    _ensureOpen();
+    // Copy so a later mutation of the caller's buffer doesn't corrupt
+    // the log.
+    _chunks.add(Uint8List.fromList(bytes));
+    _length += bytes.length;
+  }
+
+  @override
+  Stream<Uint8List> read({int fromOffset = 0}) async* {
+    _ensureOpen();
+    if (fromOffset < _truncatedBefore) {
+      throw StateError(
+          'cannot read from offset $fromOffset; truncated before '
+          '$_truncatedBefore');
+    }
+    var pos = _truncatedBefore;
+    for (final chunk in _chunks) {
+      final chunkEnd = pos + chunk.length;
+      if (chunkEnd <= fromOffset) {
+        pos = chunkEnd;
+        continue;
+      }
+      if (pos >= fromOffset) {
+        yield chunk;
+      } else {
+        // Read straddles the start: yield the tail after the requested
+        // offset.
+        yield Uint8List.sublistView(chunk, fromOffset - pos);
+      }
+      pos = chunkEnd;
+    }
+  }
+
+  @override
+  int get length => _length;
+
+  @override
+  Future<int> truncate({required int upToOffset}) async {
+    _ensureOpen();
+    if (upToOffset <= _truncatedBefore) return _truncatedBefore;
+    var pos = _truncatedBefore;
+    while (_chunks.isNotEmpty && pos + _chunks.first.length <= upToOffset) {
+      pos += _chunks.first.length;
+      _chunks.removeAt(0);
+    }
+    _truncatedBefore = pos;
+    return _truncatedBefore;
+  }
+
+  @override
+  Future<void> sync() async {
+    _ensureOpen();
+    // RAM-only — no kernel buffer to flush.
+  }
+
+  @override
+  Future<void> close() async {
+    _closed = true;
+    _chunks.clear();
+  }
+
+  void _ensureOpen() {
+    if (_closed) throw StateError('WalStore is closed');
+  }
+}

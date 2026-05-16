@@ -9,7 +9,10 @@ version: 0.0.1
 environment:
   sdk: ^3.5.0
 
-dependencies: {}
+dependencies:
+  # `Uuid().v7()` for node/edge logicalIds (plan §6.3, §7.4). Pinned
+  # per the §13 dep audit.
+  uuid: ^4.5.0
 
 dev_dependencies:
   test: ^1.24.0

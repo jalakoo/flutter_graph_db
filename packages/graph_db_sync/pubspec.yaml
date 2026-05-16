@@ -1,0 +1,23 @@
+name: graph_db_sync
+description: >-
+  Push (and eventually bidirectional) sync engine — consumes the WAL
+  `WalOp` stream and ships transactions to configured
+  `RemoteGraphClient`s (plan §10). Stub — implementation lands in
+  Phase 7.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  graph_db_core:
+    path: ../graph_db_core
+  graph_db_wal:
+    path: ../graph_db_wal
+  graph_db_remote:
+    path: ../graph_db_remote
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^4.0.0
