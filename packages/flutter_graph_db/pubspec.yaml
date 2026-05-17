@@ -1,0 +1,25 @@
+name: flutter_graph_db
+description: >-
+  Umbrella package for the Flutter-native graph database. Re-exports
+  `graph_db_core` (engine), `graph_db_wal` (persistence), and
+  `graph_db_gql` (OpenCypher subset). Most Flutter app developers
+  depend on this one package and import a single file. For
+  tree-shaking / library authoring, depend on the sub-packages
+  directly instead.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  graph_db_core:
+    path: ../graph_db_core
+  graph_db_wal:
+    path: ../graph_db_wal
+  graph_db_gql:
+    path: ../graph_db_gql
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^4.0.0

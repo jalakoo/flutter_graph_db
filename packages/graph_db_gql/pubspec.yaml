@@ -1,0 +1,22 @@
+name: graph_db_gql
+description: >-
+  OpenCypher subset parser, planner, and executor for `graph_db_core`
+  (plan §8). v1 ships MATCH / WHERE / RETURN / CREATE / DELETE / SET /
+  MERGE (single-pattern) with the six standard aggregations, ORDER BY /
+  LIMIT / SKIP, and BFS / bidirectional BFS for variable-length paths.
+  Lives in its own package so the engine surface stays focused — depend
+  on this only if you want a query language. The `flutter_graph_db`
+  umbrella package re-exports this for one-import convenience.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  graph_db_core:
+    path: ../graph_db_core
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^4.0.0
