@@ -1,47 +1,282 @@
 # flutter_graph_db
 
-Umbrella package — the one-import entry point for the Flutter-native
-graph database. Re-exports:
+Embedded, Flutter-native graph database. One in-process engine that
+runs on iOS, Android, macOS, Windows, Linux, and the browser
+(`dart2js` + `dart2wasm`) from the same code path.
 
-- `graph_db_core` — engine (CSR, properties, applicator, public API)
-- `graph_db_wal` — WAL persistence + recovery
-- `graph_db_gql` — OpenCypher subset (parser, planner, executor)
+This is the **umbrella package** — depend on it once, import one
+file, and you get the engine + WAL persistence + an OpenCypher query
+layer in tree. Adapters that not every app needs (Neo4j / FalkorDB /
+sync) live in separate packages and are imported explicitly.
 
-## Quick start
+## Contents
+
+- [Install](#install)
+- [Quick start — in-memory](#quick-start--in-memory)
+- [Read-your-writes — the merge lifecycle](#read-your-writes--the-merge-lifecycle)
+- [Mobile / desktop persistence](#mobile--desktop-persistence-ios--android--macos--windows--linux)
+- [Web persistence](#web-persistence-chrome--safari--firefox)
+- [Snapshot + compact cycle](#snapshot--compact-cycle-long-running-apps)
+- [Sub-packages — when to depend directly](#sub-packages--when-to-depend-directly)
+- [Benchmarking](#benchmarking)
+- [Run the example app](#run-the-example-app)
+
+## Install
+
+Local git dependency (the only currently-supported install path —
+this package isn't on `pub.dev` yet):
 
 ```yaml
 dependencies:
-  flutter_graph_db: ^0.1.0
+  flutter_graph_db:
+    git:
+      url: https://github.com/<your-org>/flutter_graph_db.git
+      path: flutter_graph_db/packages/flutter_graph_db
+```
+
+If you're working on the engine alongside the consuming app, a path
+dependency reloads live across the link:
+
+```yaml
+dependencies:
+  flutter_graph_db:
+    path: ../flutter_graph_db/packages/flutter_graph_db
+```
+
+## Quick start — in-memory
+
+The shortest path to a working engine. No WAL, no persistence — good
+for tests and the read-of-the-week.
+
+```dart
+import 'dart:typed_data';
+import 'package:flutter_graph_db/flutter_graph_db.dart';
+
+Future<void> main() async {
+  final db = GraphDb.fromState(MutableGraphState.fromFixture(
+    nodeCount: 0,
+    srcs: Uint32List(0),
+    dsts: Uint32List(0),
+    edgeTypes: Uint32List(0),
+    labelOf: Uint32List(0),
+    labelNames: const [],
+    edgeTypeNames: const [],
+    vidSpace: 1024,
+    eidSpace: 1024,
+  ));
+
+  final person = db.internLabel('Person');
+  final knows = db.internEdgeType('KNOWS');
+  final name = db.internPropKey('name');
+
+  await db.runTransaction((txn) {
+    final ada = txn.addNode(labelIds: [person], props: {
+      name: const PropString('Ada'),
+    });
+    final bob = txn.addNode(labelIds: [person], props: {
+      name: const PropString('Bob'),
+    });
+    txn.addEdge(src: ada, dst: bob, typeId: knows);
+  });
+
+  // Primitive range reads — allocation-free.
+  for (final v in db.labelScan(person)) {
+    print('${db.getNodeStringProp(v, name)} '
+          'out=${db.outDegree(v)}');
+  }
+
+  // GQL via the extension method `executeQuery` (re-exported from
+  // graph_db_gql).
+  final rows = await db.executeQuery(
+    'MATCH (n:Person) RETURN n.name AS name',
+    {},
+  );
+  for (final row in rows) {
+    print(row['name']);
+  }
+}
+```
+
+## Read-your-writes — the merge lifecycle
+
+`runTransaction` lands committed mutations in the per-vid **overlay**.
+Indexed reads (`labelScan`, `outDegree`, `outNeighbors`, etc.) and
+`nodeCount` / `edgeCount` read from the CSR base; they don't see the
+overlay until the next merge.
+
+Merges happen automatically at `max(10_000, 5% of edges)` per state.
+For "read-your-writes" right after a transaction:
+
+```dart
+await db.runTransaction((txn) {
+  txn.addNode(labelIds: [person], props: {name: const PropString('Ada')});
+});
+// Force the overlay to fold into CSR — typically <50µs on a small graph.
+db.state.mergeNow();
+// Now labelScan, nodeCount, etc. see the new node.
+```
+
+`executeQuery` (GQL) already does this — the planner reads the live
+state including the overlay, so GQL is always consistent.
+
+## Mobile / desktop persistence (iOS / Android / macOS / Windows / Linux)
+
+The native WAL adapter lives in `package:graph_db_wal/io_wal_store.dart`
+— a separate import so a web build keeps `dart:io` out of its
+dependency cone. Wire it with `path_provider` to land the WAL in the
+app's documents directory.
+
+```yaml
+dependencies:
+  flutter_graph_db:
+    git:
+      url: https://github.com/<your-org>/flutter_graph_db.git
+      path: flutter_graph_db/packages/flutter_graph_db
+  graph_db_wal:
+    git:
+      url: https://github.com/<your-org>/flutter_graph_db.git
+      path: flutter_graph_db/packages/graph_db_wal
+  path_provider: ^2.1.0
 ```
 
 ```dart
+import 'package:flutter/widgets.dart';
 import 'package:flutter_graph_db/flutter_graph_db.dart';
 import 'package:graph_db_wal/io_wal_store.dart'; // native-only adapter
 import 'package:path_provider/path_provider.dart';
 
-Future<void> main() async {
+Future<GraphDb> openMobileDb() async {
   WidgetsFlutterBinding.ensureInitialized();
   final dir = await getApplicationDocumentsDirectory();
-  final store = IoWalStore('${dir.path}/graph.wal');
+  final store = await IoWalStore.open('${dir.path}/graph.wal');
+
+  // Recovers any prior session's WAL automatically.
   final db = await openWalBackedGraphDb(store: store);
-
-  await db.runTransaction((txn) {
-    final alice = txn.addNode(labelIds: [db.internLabel('Person')], props: {
-      db.internPropKey('name'): const PropString('Alice'),
-    });
-  });
-
-  final result = await db.executeQuery(
-    'MATCH (n:Person) WHERE n.age > 30 RETURN n.name',
-    {},
-  );
-
-  runApp(MyApp(db: db, result: result));
+  return db;
 }
 ```
 
-## When to skip the umbrella
+On Android, `getApplicationDocumentsDirectory()` resolves to the app's
+sandboxed internal storage — no manifest changes or runtime permission
+prompts required. iOS sandboxing is the same; the directory is part of
+the app's container.
 
-- You only need the primitive read/write API — depend on `graph_db_core` directly.
-- You want a specific sub-package version newer than what the umbrella pins.
-- You're publishing a library that depends on this — explicit deps document your real surface needs.
+## Web persistence (Chrome / Safari / Firefox)
+
+The browser-side adapter is opt-in via
+`package:graph_db_wal/indexeddb_wal_store.dart`. It uses
+`package:web`'s direct JS interop to talk to IndexedDB; no extra
+runtime deps.
+
+```dart
+import 'package:flutter_graph_db/flutter_graph_db.dart';
+import 'package:graph_db_wal/indexeddb_wal_store.dart'; // web-only
+
+Future<GraphDb> openWebDb() async {
+  final store = await openIndexedDbWalStore(); // default dbName: 'graph_db_wal'
+  final db = await openWalBackedGraphDb(store: store);
+  return db;
+}
+```
+
+A conditional import keeps the right adapter per platform:
+
+```dart
+// db_factory.dart
+export 'db_factory_io.dart'
+  if (dart.library.js_interop) 'db_factory_web.dart';
+```
+
+## Snapshot + compact cycle (long-running apps)
+
+After enough mutations, the WAL grows. Take a snapshot, persist it,
+and compact the WAL up to the snapshot's LSN:
+
+```dart
+db.state.mergeNow(); // codec invariant: overlay must be empty
+final snap = encodeSnapshot(db.state);
+await File('${dir.path}/graph.snapshot').writeAsBytes(snap.bytes);
+await compactToCurrentTip(store: store);
+```
+
+On next launch, restore the snapshot then let recovery replay any WAL
+bytes appended after it:
+
+```dart
+final snapBytes = await File('${dir.path}/graph.snapshot').readAsBytes();
+final db = await openWalBackedGraphDb(
+  store: store,
+  snapshot: snapBytes,
+);
+```
+
+The cycle is identical on every platform — only the `WalStore`
+implementation differs.
+
+## Sub-packages — when to depend directly
+
+The umbrella re-exports the three packages most apps need (`core`,
+`wal`, `gql`). Other packages are opt-in:
+
+| Package | What it adds | When you need it |
+|---|---|---|
+| [`graph_db_core`](../graph_db_core) | engine only | minimal dependency surface; you're a library author |
+| [`graph_db_wal`](../graph_db_wal) | WAL persistence + io / indexeddb adapters | always (transitively via umbrella) |
+| [`graph_db_gql`](../graph_db_gql) | OpenCypher subset (parser, planner, push-based executor) | you want `db.executeQuery(...)` |
+| [`graph_db_remote`](../graph_db_remote) | `RemoteGraphClient` interface for sync targets | building a custom remote adapter |
+| [`graph_db_remote_neo4j`](../graph_db_remote_neo4j) | Bolt v4/v5 client for Neo4j | syncing to Neo4j |
+| [`graph_db_remote_falkor`](../graph_db_remote_falkor) | RESP client for FalkorDB | syncing to FalkorDB |
+| [`graph_db_sync`](../graph_db_sync) | push-only sync engine | pushing local mutations to a remote graph |
+| [`graph_db_bench`](../graph_db_bench) | R-MAT generators + latency harness | local perf testing — see [Benchmarking](#benchmarking) |
+
+## Benchmarking
+
+Two benchmarking surfaces ship in the repo. Pick the one that matches
+how you want to measure.
+
+### CLI bench harness — `graph_db_bench`
+
+`packages/graph_db_bench/` — pure-Dart benchmark harness for
+non-Flutter measurement runs. R-MAT graph generators, hub-seed
+selection, latency + JIT GC-event capture. Mirrors the spike-phase
+report format so numbers are directly comparable across runs.
+
+```sh
+cd packages/graph_db_bench
+dart run bin/read_bench.dart
+```
+
+Use this when you want repeatable numbers without Flutter / app
+overhead in the loop, or when profiling against a remote backend.
+
+### In-app perf widget
+
+The example app ships a self-contained `PerfBench` widget
+(`example/lib/src/widgets/perf_bench.dart`, ~250 lines, depends on
+`flutter/material` + `graph_db_core`). Runs N node inserts against a
+fresh temp `GraphDb`, then merge, then N×10 reads. Reports total /
+p50 / p99 / throughput + merge stall with per-platform tagging +
+one-tap clipboard copy.
+
+To use it in your own app: copy the file into your project and drop
+`const PerfBench()` anywhere in your widget tree (e.g. a debug page).
+Same code path runs on web / iOS / Android / desktop, so cross-target
+comparison is paste-and-compare.
+
+## Run the example app
+
+The repo includes a Flutter sample app under `example/` that exercises
+the full public API surface — People / Companies / Graph / Stats tabs,
+real CRUD, WAL-backed persistence, an interactive node-link graph
+view, and the in-app perf bench.
+
+```sh
+cd example
+flutter pub get
+flutter run                              # default device
+flutter run -d chrome --profile          # web, profile mode (recommended for perf bench)
+flutter run -d <iphone> --release        # iPhone release build
+```
+
+See [`example/README.md`](../../example/README.md) for the per-screen
+breakdown, persistence + reset behaviour, and the file layout.

@@ -15,6 +15,12 @@ library;
 import 'dart:typed_data';
 
 import 'package:graph_db_core/graph_db_core.dart';
+// Internal cross-package reach into graph_db_core's applicator. The
+// applicator is intentionally not on the public surface (only
+// `GraphDb.runTransaction` is) — WAL recovery is the one legitimate
+// alt path, so it imports directly from `src/`.
+// ignore: implementation_imports
+import 'package:graph_db_core/src/applicator.dart';
 
 import 'codec/wal_codec.dart';
 import 'wal_reader.dart';

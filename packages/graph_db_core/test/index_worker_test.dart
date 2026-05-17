@@ -4,6 +4,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:graph_db_core/graph_db_core.dart';
+import 'package:graph_db_core/src/secondary_index/index_worker.dart';
 import 'package:test/test.dart';
 
 void main() {

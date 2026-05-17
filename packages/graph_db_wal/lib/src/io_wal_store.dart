@@ -8,10 +8,13 @@ import 'wal_store.dart';
 /// `dart:io` `RandomAccessFile`-backed [WalStore] adapter (plan §11).
 /// The default on iOS / Android / desktop.
 ///
-/// **Phase 0 skeleton — single-file mode.** The rotated 16 MB segment
-/// layout (§6.2) lands in Phase 2 alongside truncate-by-whole-segment.
-/// For now [truncate] throws [UnimplementedError]; the rest of the
-/// `WalStore` contract is honoured.
+/// **Single-file mode.** All bytes live in one file at the given path.
+/// [truncate] is implemented via tail-rewrite (read the kept tail
+/// into memory, overwrite from byte 0, truncate the file to the new
+/// length). This works for typical WAL sizes (<100 MB) but rewrites
+/// the whole file on each compact; the rotated 16 MB segment layout
+/// (plan §6.2) is the proper polish — O(1) truncate via segment-file
+/// delete. Tracked as a Phase 2 carry-forward.
 class IoWalStore implements WalStore {
   final File _file;
   RandomAccessFile? _raf;
@@ -70,9 +73,43 @@ class IoWalStore implements WalStore {
   @override
   Future<int> truncate({required int upToOffset}) async {
     _ensureOpen();
-    throw UnimplementedError(
-        'IoWalStore truncate lands in Phase 2 alongside the rotated '
-        '16 MB segment layout (plan §6.2).');
+    if (upToOffset <= 0) return 0;
+    if (upToOffset >= _length) {
+      // Truncating the entire file — fast path: zero it.
+      await _raf!.setPosition(0);
+      await _raf!.truncate(0);
+      await _raf!.flush();
+      _length = 0;
+      return upToOffset;
+    }
+    // Tail-rewrite: read [upToOffset..length) into memory, overwrite
+    // from byte 0, truncate to the new length. The whole-file rewrite
+    // cost is the trade-off for staying in single-file mode; the
+    // rotated-segment design (§6.2) gets to O(1) per compact.
+    final tailLength = _length - upToOffset;
+    final reader = await _file.open();
+    Uint8List tail;
+    try {
+      await reader.setPosition(upToOffset);
+      tail = await reader.read(tailLength);
+    } finally {
+      await reader.close();
+    }
+    // The append handle is `FileMode.append` which appends regardless
+    // of `setPosition`. Reopen in write mode for the rewrite, then
+    // restore the append handle so subsequent appends work normally.
+    await _raf!.close();
+    final rewrite = await _file.open(mode: FileMode.write);
+    try {
+      await rewrite.writeFrom(tail);
+      await rewrite.truncate(tailLength);
+      await rewrite.flush();
+    } finally {
+      await rewrite.close();
+    }
+    _raf = await _file.open(mode: FileMode.append);
+    _length = tailLength;
+    return upToOffset;
   }
 
   @override

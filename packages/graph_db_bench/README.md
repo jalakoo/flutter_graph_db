@@ -1,29 +1,37 @@
 # graph_db_bench
 
-Dev-only benchmark harness for `graph_db_core` — plan §12. Owns the
-R-MAT fixture generator, hub-seed traversal selection, latency
-percentiles, JIT GC-event signal, and the Phase-1 read workloads from
-plan §15.
+Dev-only benchmark harness for `graph_db_core`. R-MAT fixture
+generator, hub-seed selection, latency percentiles, JIT GC-event
+signal, and read / write workloads against the real engine API.
 
-Mirrors `SPIKE_A/` in shape so numbers are directly comparable to the
-spike record. The difference is that `graph_db_bench` benches the real
-`graph_db_core` API (`MutableGraphState` + `GraphDb`), not a standalone
-SPIKE_A clone.
+For an in-app perf measurement widget that runs on iOS / Android /
+web / desktop from inside a Flutter app, see the `PerfBench` widget
+shipped in [`example/lib/src/widgets/perf_bench.dart`](../../example/lib/src/widgets/perf_bench.dart).
+Use the bench package here when you want repeatable CLI numbers
+without Flutter / app overhead in the loop.
+
+## Contents
+
+- [Workloads](#workloads)
+- [Running](#running)
+- [Reading the output](#reading-the-output)
+- [On-device runs](#on-device-runs)
+- [Layout](#layout)
 
 ## Workloads
 
 - **Out-neighbour traversal** — folds over hub seeds in three shapes:
-  `iterable` (sync\* — not offered by `graph_db_core`, benched only for
-  comparison), `callback` (`GraphDb.forEachOutNeighbor` sugar),
-  `primitive` (direct CSR range indexing — the locked Phase-1 read API).
+  `iterable` (for comparison only — `graph_db_core` doesn't actually
+  expose this shape), `callback` (`GraphDb.forEachOutNeighbor`
+  sugar), and `primitive` (direct CSR range indexing — the locked
+  fast-path read API).
 - **Label scan** — `for-in` vs indexed loop over the pre-built sorted
-  vid list. Plan §15 acceptance: p50 ≤ 10µs / 1k vids.
+  vid list. Target: p50 ≤ 10 µs / 1k vids.
 - **2-hop BFS** — reused-scratch BFS with epoch-marker visited set.
-  Plan §15 acceptance: p50 ≤ 100µs over a 100k-edge graph.
+  Target: p50 ≤ 100 µs over a 100k-edge graph.
 - **Property predicate scan** — raw typed accessor
   (`GraphDb.getNodeIntProp`) vs the boundary boxed accessor
-  (`GraphDb.getNodeProp` → `PropInt`). Plan §15 acceptance: p50 ≤ 5ms /
-  1M nodes.
+  (`GraphDb.getNodeProp` → `PropInt`). Target: p50 ≤ 5 ms / 1M nodes.
 
 ## Running
 
@@ -46,19 +54,18 @@ dart compile exe bin/read_bench.dart -o build/bench
 
 ## Reading the output
 
-- **`gc/op`** — mean GCs triggered per op. JIT-only. At the noise floor
-  (~0.000) ⇒ the inner loop is allocation-free; clearly non-zero ⇒ it
-  allocates.
-- **`p50` / `p99` / `min`** — latency percentiles in µs. Label scan, BFS,
-  and property scan carry the plan §15 targets; PASS / FAIL is printed
-  per row.
+- **`gc/op`** — mean GCs triggered per op. JIT-only. At the noise
+  floor (~0.000) ⇒ the inner loop is allocation-free; clearly
+  non-zero ⇒ it allocates.
+- **`p50` / `p99` / `min`** — latency percentiles in µs. Label scan,
+  BFS, and property scan carry per-workload targets; PASS / FAIL is
+  printed per row.
 
-## On-device verdict (recommended follow-up)
+## On-device runs
 
-The numbers that drive a perf-claim live on physical hardware. Mirror
-the `SPIKE_A/device_runner/` pattern: a thin Flutter app that calls
-`runReadWorkloads(...)` from an `integration_test`, prints the report
-to the host console. Pattern:
+The numbers that drive a real perf claim live on physical hardware.
+A thin Flutter app can call `runReadWorkloads(...)` from an
+`integration_test` and print the report to the host console:
 
 ```
 packages/graph_db_bench/device_runner/
@@ -70,8 +77,8 @@ packages/graph_db_bench/device_runner/
 Run:
 `flutter test integration_test/bench_test.dart -d <iphone-id>`
 
-Out of scope for this commit; add when an iPhone perf-regression check
-is needed.
+Out of scope for this package's default ship — add when an
+iPhone / Android perf-regression check is needed.
 
 ## Layout
 
@@ -84,6 +91,8 @@ lib/
     latency.dart         # LatencyStats + measureLatency + blackhole + escapeSink
     gc_signal.dart       # SelfConnection + connectSelf + measureGcPerOp
     runner.dart          # runReadWorkloads — full report string
+    write_runner.dart    # write-side workloads
+    index_bench.dart     # secondary-index build + query bench
 bin/
   read_bench.dart        # desktop CLI
 test/

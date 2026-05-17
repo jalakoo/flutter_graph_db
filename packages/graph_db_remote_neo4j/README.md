@@ -1,7 +1,45 @@
 # graph_db_remote_neo4j
 
-Bolt-over-Dart `RemoteGraphClient` adapter for Neo4j — plan §9.1.
+`RemoteGraphClient` adapter for Neo4j over the Bolt v4 / v5 binary
+protocol.
 
-**Status:** Phase 0 skeleton. Implementation lands in Phase 4 per plan
-§14. Audit `neo4j_dart` / `bolt_dart` for production quality first; port
-the minimal Bolt subset if neither passes (§13 contingency).
+Wraps a hand-rolled `PackStream` codec, chunked framing, and the
+handshake / `HELLO` / `RUN` / `PULL` message flow — no community
+package dependency, so the wire layer is auditable in tree.
+
+## Usage
+
+```dart
+import 'package:graph_db_remote/graph_db_remote.dart';
+import 'package:graph_db_remote_neo4j/graph_db_remote_neo4j.dart';
+
+final client = Neo4jBoltClient(
+  host: 'localhost',
+  port: 7687,
+  auth: BoltBasicAuth(user: 'neo4j', password: 'secret'),
+);
+
+await client.bulkImport(myImportOpStream);
+final result = await client.executeReadQuery(
+  'MATCH (n:Person) RETURN n.name',
+  {},
+);
+```
+
+Plug into the sync engine:
+
+```dart
+final target = SyncTarget(
+  name: 'prod-neo4j',
+  client: client,
+  seedingMode: SeedingMode.incremental,
+);
+final engine = SyncEngine(db: db, walStore: store, targets: [target]);
+await engine.syncOnce();
+```
+
+## Status notes
+
+Live-backend integration tests (Docker'd Neo4j) are exercised
+manually. Wire the bring-up into your own CI lane if you depend on
+this adapter for production sync.

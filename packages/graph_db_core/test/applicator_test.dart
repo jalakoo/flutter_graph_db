@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:graph_db_core/graph_db_core.dart';
+import 'package:graph_db_core/src/applicator.dart';
 import 'package:test/test.dart';
 
 MutableGraphState _empty() => MutableGraphState.fromFixture(

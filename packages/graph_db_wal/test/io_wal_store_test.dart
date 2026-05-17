@@ -68,15 +68,48 @@ void main() {
     }
   });
 
-  test('truncate is Phase-2 work — throws UnimplementedError for now',
+  test('truncate drops the prefix and shifts the tail to byte 0',
       () async {
     final store = await IoWalStore.open(walPath());
     try {
-      await store.append(_bytes([1, 2, 3]), durability: Durability.group);
-      expect(
-        () => store.truncate(upToOffset: 1),
-        throwsA(isA<UnimplementedError>()),
-      );
+      await store.append(_bytes([1, 2, 3, 4, 5]), durability: Durability.fsync);
+      final retained = await store.truncate(upToOffset: 2);
+      expect(retained, 2);
+      expect(store.length, 3);
+      expect(await _readAll(store), _bytes([3, 4, 5]));
+      // Appending after truncate continues at the new tip.
+      await store.append(_bytes([6, 7]), durability: Durability.fsync);
+      expect(store.length, 5);
+      expect(await _readAll(store), _bytes([3, 4, 5, 6, 7]));
+    } finally {
+      await store.close();
+    }
+  });
+
+  test('truncate survives a close+reopen cycle', () async {
+    final path = walPath();
+    final a = await IoWalStore.open(path);
+    await a.append(_bytes([1, 2, 3, 4, 5]), durability: Durability.fsync);
+    await a.truncate(upToOffset: 2);
+    await a.close();
+
+    final b = await IoWalStore.open(path);
+    try {
+      expect(b.length, 3);
+      expect(await _readAll(b), _bytes([3, 4, 5]));
+    } finally {
+      await b.close();
+    }
+  });
+
+  test('truncate past the end zeroes the file', () async {
+    final store = await IoWalStore.open(walPath());
+    try {
+      await store.append(_bytes([1, 2, 3]), durability: Durability.fsync);
+      final retained = await store.truncate(upToOffset: 10);
+      expect(retained, 10);
+      expect(store.length, 0);
+      expect(await _readAll(store), Uint8List(0));
     } finally {
       await store.close();
     }

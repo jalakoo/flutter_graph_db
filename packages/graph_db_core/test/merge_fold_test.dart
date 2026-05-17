@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:graph_db_core/graph_db_core.dart';
+import 'package:graph_db_core/src/merge/merge_fold.dart';
 import 'package:test/test.dart';
 
 /// Builds a 3-node, 2-edge baseline (same shape as mutation_test):

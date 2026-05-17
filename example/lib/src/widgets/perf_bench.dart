@@ -12,7 +12,9 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:graph_db_core/graph_db_core.dart';
 
 class PerfBench extends StatefulWidget {
@@ -88,14 +90,17 @@ class _PerfBenchState extends State<PerfBench> {
               children: [
                 Text('N: ', style: theme.textTheme.labelLarge),
                 const SizedBox(width: 8),
-                SegmentedButton<int>(
-                  segments: [
+                DropdownButton<int>(
+                  value: _n,
+                  items: [
                     for (final s in _sizes)
-                      ButtonSegment(value: s, label: Text('$s')),
+                      DropdownMenuItem(value: s, child: Text('$s')),
                   ],
-                  selected: {_n},
-                  onSelectionChanged:
-                      _running ? null : (s) => setState(() => _n = s.first),
+                  onChanged: _running
+                      ? null
+                      : (v) {
+                          if (v != null) setState(() => _n = v);
+                        },
                 ),
                 const Spacer(),
                 FilledButton.icon(
@@ -131,9 +136,33 @@ class _PerfBenchState extends State<PerfBench> {
   }
 }
 
-class _ResultsTable extends StatelessWidget {
+class _ResultsTable extends StatefulWidget {
   final _BenchResult result;
   const _ResultsTable({required this.result});
+
+  @override
+  State<_ResultsTable> createState() => _ResultsTableState();
+}
+
+class _ResultsTableState extends State<_ResultsTable> {
+  bool _copied = false;
+  Timer? _copyResetTimer;
+
+  @override
+  void dispose() {
+    _copyResetTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.result.shareText));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    _copyResetTimer?.cancel();
+    _copyResetTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -141,6 +170,7 @@ class _ResultsTable extends StatelessWidget {
     final mono = theme.textTheme.bodyMedium?.copyWith(
       fontFeatures: const [FontFeature.tabularFigures()],
     );
+    final result = widget.result;
 
     Widget row(String phase, _Stats s, String unit) {
       return Padding(
@@ -149,10 +179,10 @@ class _ResultsTable extends StatelessWidget {
           children: [
             SizedBox(
               width: 110,
-              child: Text(phase, style: theme.textTheme.labelLarge),
+              child: SelectableText(phase, style: theme.textTheme.labelLarge),
             ),
             Expanded(
-              child: Text(
+              child: SelectableText(
                 'total ${_fmt(s.totalUs)}µs  '
                 'p50 ${_fmt(s.p50Us)}$unit  '
                 'p99 ${_fmt(s.p99Us)}$unit  '
@@ -178,10 +208,10 @@ class _ResultsTable extends StatelessWidget {
             children: [
               SizedBox(
                 width: 110,
-                child: Text('Merge', style: theme.textTheme.labelLarge),
+                child: SelectableText('Merge', style: theme.textTheme.labelLarge),
               ),
               Expanded(
-                child: Text(
+                child: SelectableText(
                   '${_fmt(result.mergeUs)}µs (sync, full overlay fold)',
                   style: mono,
                 ),
@@ -189,12 +219,36 @@ class _ResultsTable extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: 8),
-        SelectableText(
-          result.shareText,
-          style: theme.textTheme.bodySmall?.copyWith(
-            fontFamily: 'monospace',
-            color: theme.colorScheme.onSurfaceVariant,
+        const SizedBox(height: 12),
+        // Copyable summary block — long-press selects on touch, mouse
+        // selects on drag; the button copies the canonical share line
+        // straight to the clipboard with no selection ceremony.
+        Container(
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: SelectableText(
+                  result.shareText,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: _copied ? 'Copied' : 'Copy to clipboard',
+                icon: Icon(_copied ? Icons.check : Icons.copy, size: 18),
+                color: _copied ? theme.colorScheme.primary : null,
+                visualDensity: VisualDensity.compact,
+                onPressed: _copy,
+              ),
+            ],
           ),
         ),
       ],
@@ -232,11 +286,17 @@ class _BenchResult {
     required this.mergeUs,
   });
 
-  String get shareText => 'N=$n  '
-      'insert p50=${insert.p50Us}µs p99=${insert.p99Us}µs '
-      '(${insert.opsPerSec.round()}/s)  '
-      'read p50=${read.p50Us}µs p99=${read.p99Us}µs  '
-      'merge=$mergeUsµs';
+  /// Single-line summary suitable for pasting into a chat / issue.
+  String get shareText {
+    final platform = defaultTargetPlatform.name; // iOS / android / macOS / …
+    final web = kIsWeb ? '/web' : '';
+    return 'flutter_graph_db perf bench  [$platform$web]  '
+        'N=$n  '
+        'insert p50=${insert.p50Us}µs p99=${insert.p99Us}µs '
+        '(${insert.opsPerSec.round()}/s)  '
+        'read p50=${read.p50Us}µs p99=${read.p99Us}µs  '
+        'merge=$mergeUsµs';
+  }
 }
 
 Future<_BenchResult> _runBench(int n) async {
@@ -277,6 +337,18 @@ Future<_BenchResult> _runBench(int n) async {
   }
   final insertTotalUs = overallSw.elapsedMicroseconds;
 
+  // ---- Merge phase ----
+  // Run BEFORE the read phase. Inserts land in the overlay; primitive
+  // reads (outDegree) hit the CSR, which is empty until the overlay
+  // folds in. Measuring merge here also captures the cost the engine
+  // would have paid asynchronously at the threshold.
+  sw
+    ..reset()
+    ..start();
+  db.state.mergeNow();
+  sw.stop();
+  final mergeUs = sw.elapsedMicroseconds;
+
   // ---- Read phase ----
   // 10× the node count, capped, so we get a clean p99 even at N=100.
   final readCount = (n * 10).clamp(1000, 100000);
@@ -295,14 +367,6 @@ Future<_BenchResult> _runBench(int n) async {
     readLatencies[i] = sw.elapsedMicroseconds;
   }
   final readTotalUs = overallSw.elapsedMicroseconds;
-
-  // ---- Merge phase ----
-  sw
-    ..reset()
-    ..start();
-  db.state.mergeNow();
-  sw.stop();
-  final mergeUs = sw.elapsedMicroseconds;
 
   return _BenchResult(
     n: n,

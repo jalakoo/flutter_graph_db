@@ -134,7 +134,16 @@ class GraphDb {
 
   // -------------------------------------------------------------- topology
 
+  /// CSR-resident node count. **Read-your-writes:** recently
+  /// committed mutations land in the overlay first and aren't
+  /// reflected here until the next merge (automatic per
+  /// `mergeThreshold` or via explicit `db.state.mergeNow()`). Call
+  /// [mergeNow](MutableGraphState.mergeNow) after a mutation if you
+  /// need the count to include it immediately.
   int get nodeCount => _state.csr.nodeCount;
+
+  /// CSR-resident edge count. Same read-your-writes caveat as
+  /// [nodeCount].
   int get edgeCount => _state.csr.edgeCount;
   int outDegree(Vid vid) => _state.csr.outDegree(vid.value);
   int inDegree(Vid vid) => _state.csr.inDegree(vid.value);

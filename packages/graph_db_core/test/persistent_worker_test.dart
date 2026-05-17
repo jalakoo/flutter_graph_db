@@ -3,7 +3,7 @@ library;
 
 import 'dart:isolate';
 
-import 'package:graph_db_core/graph_db_core.dart';
+import 'package:graph_db_core/src/isolate/persistent_worker.dart';
 import 'package:test/test.dart';
 
 // Top-level worker entry points (Isolate.spawn cannot take closures).
