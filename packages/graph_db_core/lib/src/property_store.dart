@@ -247,6 +247,15 @@ class PropertyStore {
     _columns[keyId]?.tombstone(vid);
   }
 
+  /// Tombstones [vid] in every declared column — called by
+  /// `MutableGraphState.applyDelNode` so secondary-index rebuilds
+  /// don't pick up properties of a deleted node (plan §14 Phase 5).
+  void removeAllForVid(int vid) {
+    for (final col in _columns.values) {
+      col.tombstone(vid);
+    }
+  }
+
   _Column _columnFor(int keyId, ColumnType requestedType) {
     final existing = _columns[keyId];
     if (existing == null) {

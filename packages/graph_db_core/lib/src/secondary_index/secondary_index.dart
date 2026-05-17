@@ -28,16 +28,17 @@ abstract class SecondaryIndex {
   int get length;
 
   /// The vid at sorted position [i].
-  ///
-  /// Callers combine this with the type-specific `lowerBound` /
-  /// `upperBound` accessors on the concrete class to scan a range
-  /// allocation-free. See plan §5 for the primitive-range pattern.
   int vidAt(int i);
 
   /// View of the parallel-array vids. Same content as iterating
   /// [vidAt]; exposed for callers that need a `Uint32List` reference
   /// (e.g. to pass to a CSR overlay merge).
   Uint32List get sortedVids;
+
+  /// True when the spec's [EqualityRange.unique] flag is set — the
+  /// registry consults this to enforce uniqueness on every
+  /// mutation that touches the indexed property (plan §14 Phase 5).
+  bool get isUnique;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,20 +162,67 @@ class IntEqualityRangeIndex implements SecondaryIndex {
   final IndexSpec spec;
 
   /// Sorted values, length == [length]. Index `i` pairs with
-  /// [sortedVids] index `i`.
-  final Int64List sortedValues;
+  /// [sortedVids] index `i`. Non-final: replaced lazily on the first
+  /// range query after an incremental mutation (plan §14 Phase 5).
+  Int64List sortedValues;
 
   @override
-  final Uint32List sortedVids;
+  Uint32List sortedVids;
 
-  final Map<int, Uint32List>? _hash;
+  /// Hash overlay storage. Always present when the spec asks for
+  /// `hashOverlay: true` OR `incremental: true`. Growable inner
+  /// lists so incremental [insert] / [removeVid] can mutate in
+  /// place; [equalsHash] copies to `Uint32List` on demand.
+  Map<int, List<int>>? _hash;
+
+  /// Reverse lookup `vid → currently-indexed value`. Populated only
+  /// when the spec asks for `incremental: true`. Used by
+  /// [removeVid] to find the old value's hash bucket in O(1).
+  Map<int, int>? _vidToValue;
+
+  /// `true` when an incremental mutation has invalidated the sorted
+  /// arrays. Cleared by [_ensureSorted].
+  bool _sortedDirty = false;
 
   IntEqualityRangeIndex._({
     required this.spec,
     required this.sortedValues,
     required this.sortedVids,
+    required Map<int, List<int>>? hash,
+    Map<int, int>? vidToValue,
+  })  : _hash = hash,
+        _vidToValue = vidToValue;
+
+  /// Builds an instance from already-sorted typed arrays (used by the
+  /// worker-isolate rebuild path so the result is byte-identical to a
+  /// fresh `.build()`).
+  factory IntEqualityRangeIndex.fromSorted({
+    required IndexSpec spec,
+    required Int64List sortedValues,
+    required Uint32List sortedVids,
     required Map<int, Uint32List>? hash,
-  }) : _hash = hash;
+  }) {
+    final mutHash = hash == null
+        ? null
+        : {for (final e in hash.entries) e.key: List<int>.of(e.value)};
+    final incremental = (spec.kind as EqualityRange).incremental;
+    Map<int, int>? vidToValue;
+    if (incremental) {
+      vidToValue = <int, int>{};
+      for (var i = 0; i < sortedValues.length; i++) {
+        vidToValue[sortedVids[i]] = sortedValues[i];
+      }
+    }
+    final effectiveHash = mutHash ??
+        (incremental ? _buildIntHashFromSorted(sortedValues, sortedVids) : null);
+    return IntEqualityRangeIndex._(
+      spec: spec,
+      sortedValues: sortedValues,
+      sortedVids: sortedVids,
+      hash: effectiveHash,
+      vidToValue: vidToValue,
+    );
+  }
 
   factory IntEqualityRangeIndex.build({
     required IndexSpec spec,
@@ -202,16 +250,27 @@ class IntEqualityRangeIndex implements SecondaryIndex {
       sortedValues[i] = values[pairs[i]];
       sortedVids[i] = vids[pairs[i]];
     }
-    final hash = hashOverlay ? _buildIntHash(sortedValues, sortedVids) : null;
+    final incremental = (spec.kind as EqualityRange).incremental;
+    final needHash = hashOverlay || incremental;
+    final hash =
+        needHash ? _buildIntHashFromSorted(sortedValues, sortedVids) : null;
+    Map<int, int>? vidToValue;
+    if (incremental) {
+      vidToValue = <int, int>{};
+      for (var i = 0; i < filled; i++) {
+        vidToValue[sortedVids[i]] = sortedValues[i];
+      }
+    }
     return IntEqualityRangeIndex._(
       spec: spec,
       sortedValues: sortedValues,
       sortedVids: sortedVids,
       hash: hash,
+      vidToValue: vidToValue,
     );
   }
 
-  static Map<int, Uint32List> _buildIntHash(
+  static Map<int, List<int>> _buildIntHashFromSorted(
     Int64List vs,
     Uint32List vids,
   ) {
@@ -219,35 +278,124 @@ class IntEqualityRangeIndex implements SecondaryIndex {
     for (var i = 0; i < vs.length; i++) {
       (out[vs[i]] ??= <int>[]).add(vids[i]);
     }
-    return {for (final e in out.entries) e.key: Uint32List.fromList(e.value)};
+    return out;
   }
 
   @override
-  int get length => sortedVids.length;
+  int get length =>
+      _vidToValue?.length ?? sortedVids.length;
 
   @override
-  int vidAt(int i) => sortedVids[i];
+  int vidAt(int i) {
+    _ensureSorted();
+    return sortedVids[i];
+  }
 
   @override
-  int get sizeBytes =>
-      8 * sortedValues.length +
-      4 * sortedVids.length +
-      (_hash == null
-          ? 0
-          : _hash.entries
-              .fold<int>(0, (acc, e) => acc + 8 + 4 * e.value.length));
+  bool get isUnique => (spec.kind as EqualityRange).unique;
 
-  /// Smallest sorted index where value >= q.
-  int lowerBound(int q) => _lbInt(sortedValues, sortedValues.length, q);
+  @override
+  int get sizeBytes {
+    var n = 8 * sortedValues.length + 4 * sortedVids.length;
+    final h = _hash;
+    if (h != null) {
+      for (final e in h.entries) {
+        n += 8 + 4 * e.value.length;
+      }
+    }
+    final v = _vidToValue;
+    if (v != null) n += 16 * v.length; // rough — int↔int Map entries
+    return n;
+  }
 
-  /// Smallest sorted index where value > q. Equality range is
-  /// `[lowerBound(q), upperBound(q))`.
-  int upperBound(int q) => _ubInt(sortedValues, sortedValues.length, q);
+  /// Smallest sorted index where value >= q. Triggers a lazy resort
+  /// if a prior incremental mutation invalidated the sorted arrays.
+  int lowerBound(int q) {
+    _ensureSorted();
+    return _lbInt(sortedValues, sortedValues.length, q);
+  }
 
-  /// O(1) equality lookup via the hash overlay if [EqualityRange.hashOverlay]
-  /// was set on the spec; returns `null` otherwise (caller falls back to
-  /// the `lowerBound` / `upperBound` range).
-  Uint32List? equalsHash(int q) => _hash?[q];
+  /// Smallest sorted index where value > q.
+  int upperBound(int q) {
+    _ensureSorted();
+    return _ubInt(sortedValues, sortedValues.length, q);
+  }
+
+  /// O(1) equality lookup via the hash overlay (always present in
+  /// incremental mode; opt-in via `hashOverlay: true` otherwise).
+  /// Returns `null` when the value isn't indexed or no overlay was
+  /// built. Allocates a fresh `Uint32List` per call — callers
+  /// iterating the result should hoist it out of inner loops.
+  Uint32List? equalsHash(int q) {
+    final b = _hash?[q];
+    return b == null ? null : Uint32List.fromList(b);
+  }
+
+  // ----- Incremental mutations (plan §14 Phase 5) ---------------------------
+
+  /// In-place insert of a `(vid, value)` pair. Requires
+  /// `EqualityRange(incremental: true)` on the spec — throws
+  /// otherwise. O(1) hash update + dirty-mark the sorted arrays.
+  /// Re-inserting a vid that's already indexed updates its value
+  /// (same semantics as `SET n.prop = x`).
+  void insert(int vid, int value) {
+    final v2v = _vidToValue;
+    if (v2v == null) {
+      throw StateError(
+        'insert() requires EqualityRange(incremental: true) on the spec',
+      );
+    }
+    final old = v2v[vid];
+    if (old != null) {
+      _removeFromHash(vid, old);
+    }
+    (_hash!.putIfAbsent(value, () => <int>[])).add(vid);
+    v2v[vid] = value;
+    _sortedDirty = true;
+  }
+
+  /// In-place removal of [vid]. No-op if absent. Requires incremental.
+  void removeVid(int vid) {
+    final v2v = _vidToValue;
+    if (v2v == null) {
+      throw StateError(
+        'removeVid() requires EqualityRange(incremental: true) on the spec',
+      );
+    }
+    final old = v2v.remove(vid);
+    if (old == null) return;
+    _removeFromHash(vid, old);
+    _sortedDirty = true;
+  }
+
+  void _removeFromHash(int vid, int value) {
+    final bucket = _hash![value];
+    if (bucket == null) return;
+    bucket.remove(vid);
+    if (bucket.isEmpty) _hash!.remove(value);
+  }
+
+  /// Re-derives [sortedValues] / [sortedVids] from the current hash
+  /// overlay. No-op when the index isn't dirty.
+  void _ensureSorted() {
+    if (!_sortedDirty) return;
+    final v2v = _vidToValue!;
+    final n = v2v.length;
+    final entries = v2v.entries.toList()
+      ..sort((a, b) {
+        final c = a.value.compareTo(b.value);
+        return c != 0 ? c : a.key.compareTo(b.key);
+      });
+    final newValues = Int64List(n);
+    final newVids = Uint32List(n);
+    for (var i = 0; i < n; i++) {
+      newValues[i] = entries[i].value;
+      newVids[i] = entries[i].key;
+    }
+    sortedValues = newValues;
+    sortedVids = newVids;
+    _sortedDirty = false;
+  }
 }
 
 /// Equality+range index over a `double_` column.
@@ -319,12 +467,14 @@ class DoubleEqualityRangeIndex implements SecondaryIndex {
   @override
   int vidAt(int i) => sortedVids[i];
   @override
+  bool get isUnique => (spec.kind as EqualityRange).unique;
+  @override
   int get sizeBytes =>
       8 * sortedValues.length +
       4 * sortedVids.length +
       (_hash == null
           ? 0
-          : _hash.entries
+          : _hash!.entries
               .fold<int>(0, (acc, e) => acc + 8 + 4 * e.value.length));
 
   int lowerBound(double q) =>
@@ -403,12 +553,14 @@ class StringIdEqualityRangeIndex implements SecondaryIndex {
   @override
   int vidAt(int i) => sortedVids[i];
   @override
+  bool get isUnique => (spec.kind as EqualityRange).unique;
+  @override
   int get sizeBytes =>
       4 * sortedValues.length +
       4 * sortedVids.length +
       (_hash == null
           ? 0
-          : _hash.entries
+          : _hash!.entries
               .fold<int>(0, (acc, e) => acc + 8 + 4 * e.value.length));
 
   int lowerBound(int q) => _lbU32(sortedValues, sortedValues.length, q);
@@ -487,6 +639,8 @@ class StringEqualityRangeIndex implements SecondaryIndex {
   @override
   int vidAt(int i) => sortedVids[i];
   @override
+  bool get isUnique => (spec.kind as EqualityRange).unique;
+  @override
   int get sizeBytes {
     var stringBytes = 0;
     for (final s in sortedValues) {
@@ -498,7 +652,7 @@ class StringEqualityRangeIndex implements SecondaryIndex {
         4 * sortedVids.length +
         (_hash == null
             ? 0
-            : _hash.entries
+            : _hash!.entries
                 .fold<int>(0, (acc, e) => acc + 16 + 4 * e.value.length));
   }
 
@@ -560,6 +714,8 @@ class BoolEqualityRangeIndex implements SecondaryIndex {
   int get length => sortedVids.length;
   @override
   int vidAt(int i) => sortedVids[i];
+  @override
+  bool get isUnique => (spec.kind as EqualityRange).unique;
 
   /// 4 bytes per vid; no values array (the cutoff carries that
   /// information). 16 bytes overhead for the object header.

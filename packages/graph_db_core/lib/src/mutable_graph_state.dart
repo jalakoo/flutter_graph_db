@@ -11,6 +11,7 @@ import 'prop_value.dart';
 import 'property_store.dart';
 import 'secondary_index/index_size_event.dart';
 import 'secondary_index/index_spec.dart';
+import 'secondary_index/index_worker.dart';
 import 'secondary_index/secondary_index.dart';
 import 'string_interner.dart';
 
@@ -63,6 +64,13 @@ class MutableGraphState {
   /// `MergeCoordinator.spawn()` and assign before any merge would
   /// fire.
   MergeCoordinator? mergeCoordinator;
+
+  /// Optional worker-isolate index-rebuild coordinator (plan §14
+  /// Phase 5B+). When set, [flushDeferredIndexUpdatesAsync] hands
+  /// rebuilds off to the worker (supported column types only — int_
+  /// today; other types fall back to main-isolate rebuild). When
+  /// `null`, the same async call runs the rebuild inline.
+  IndexRebuildCoordinator? indexRebuildCoordinator;
 
   int _nextVid;
   int _nextEid;
@@ -421,8 +429,18 @@ class MutableGraphState {
       vid.value,
       AddedNode(logicalId: logicalId, labelIds: List.of(labelIds)),
     );
+    // Pre-check unique constraints across the whole prop bundle so
+    // partial writes aren't left behind on rejection.
+    for (final e in props.entries) {
+      _enforceUniqueNodeIndex(vid.value, e.key, e.value);
+    }
     for (final e in props.entries) {
       _writeNodeProp(vid.value, e.key, e.value);
+    }
+    // Indexes covering any written key need re-derivation.
+    final touchedKeys = props.keys.toSet();
+    for (final k in touchedKeys) {
+      _maintainNodeIndexes(vid.value, k);
     }
   }
 
@@ -444,6 +462,14 @@ class MutableGraphState {
       applyDelEdge(Eid(e));
     }
     overlay.recordDelNode(vid.value);
+    // Properties of a deleted node are also gone — tombstone them
+    // in the columnar store so the index rebuild doesn't pick them
+    // up.
+    nodeProps.removeAllForVid(vid.value);
+    // A deleted vid disappears from every index that covered it —
+    // rebuild every node index (incremental int indexes drop the
+    // vid in O(1) without a full rebuild).
+    _maintainAllNodeIndexes(deletedVid: vid.value);
   }
 
   /// Applies a `SetNodeLabels` WAL op under v1's single-label
@@ -482,12 +508,15 @@ class MutableGraphState {
     if (!_nodeExists(vid.value)) {
       throw NotFoundException('SetNodeProp on absent vid ${vid.value}');
     }
+    _enforceUniqueNodeIndex(vid.value, keyId, value);
     _writeNodeProp(vid.value, keyId, value);
+    _maintainNodeIndexes(vid.value, keyId);
   }
 
   /// Applies a `DelNodeProp` WAL op.
   void applyDelNodeProp(Vid vid, int keyId) {
     nodeProps.remove(vid.value, keyId);
+    _maintainNodeIndexes(vid.value, keyId);
   }
 
   /// Applies an `AddEdge` WAL op. Fast-forwards [nextEid].
@@ -793,6 +822,211 @@ class MutableGraphState {
   /// Removes a node-property index from the registry. Returns the
   /// removed index, or `null` if no such index existed.
   SecondaryIndex? dropNodeIndex(String name) => _nodeIndexes.remove(name);
+
+  // ----- Phase 5 mutation hooks (plan §14 Phase 5A) -----------------------
+
+  /// Throws [ConstraintViolation] if [value] is already present on a
+  /// different vid in any unique node-property index covering [keyId].
+  void _enforceUniqueNodeIndex(int vid, int keyId, PropValue value) {
+    for (final idx in _nodeIndexes.values) {
+      if (idx.spec.keyId != keyId || !idx.isUnique) continue;
+      final existing = _findVidInIndex(idx, value);
+      if (existing != null && existing != vid) {
+        throw ConstraintViolation(
+          'unique index "${idx.spec.name}" violated: '
+          'value already on vid $existing',
+        );
+      }
+    }
+  }
+
+  /// Names of indexes queued for a deferred rebuild — populated by
+  /// the mutation hook for any index whose spec has
+  /// `EqualityRange.deferred == true`. Drained by
+  /// [flushDeferredIndexUpdates] (plan §14 Phase 5B).
+  final Set<String> _pendingNodeIndexFlush = {};
+
+  /// Updates every node index whose `keyId` matches [keyId] (plan
+  /// §14 Phase 5). Strategy per-index:
+  /// - **incremental + non-unique**: O(1) `insert(vid, value)` /
+  ///   `removeVid(vid)` directly on the index (currently `int_`
+  ///   columns only — other typed columns fall back to rebuild).
+  /// - **deferred + non-unique**: queue the rebuild for the next
+  ///   `flushDeferredIndexUpdates()`.
+  /// - **otherwise (unique or default)**: drop-and-rebuild inline.
+  void _maintainNodeIndexes(int vid, int keyId) {
+    for (final name in _nodeIndexes.keys.toList()) {
+      final idx = _nodeIndexes[name]!;
+      if (idx.spec.keyId != keyId) continue;
+      final kind = idx.spec.kind;
+      if (kind is EqualityRange &&
+          kind.incremental &&
+          !kind.unique &&
+          _tryIncrementalNodeIndex(idx, vid, keyId)) {
+        continue;
+      }
+      if (kind is EqualityRange && kind.deferred && !kind.unique) {
+        _pendingNodeIndexFlush.add(name);
+      } else {
+        final spec = idx.spec;
+        _nodeIndexes.remove(name);
+        createNodePropertyIndex(spec);
+      }
+    }
+  }
+
+  /// Returns `true` if the index supports incremental mutation for
+  /// the column type at [keyId] AND the update was applied;
+  /// `false` to fall back to drop-and-rebuild.
+  bool _tryIncrementalNodeIndex(
+    SecondaryIndex idx,
+    int vid,
+    int keyId,
+  ) {
+    final colType = nodeProps.columnType(keyId);
+    if (idx is IntEqualityRangeIndex && colType == ColumnType.int_) {
+      if (nodeProps.has(vid, keyId)) {
+        idx.insert(vid, nodeProps.getInt(vid, keyId));
+      } else {
+        idx.removeVid(vid);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// Drop-and-rebuild (or incrementally remove) every registered
+  /// node index — used on `applyDelNode` where the affected
+  /// [deletedVid] spans every column. Incremental int indexes drop
+  /// the vid in O(1) without a full rebuild.
+  void _maintainAllNodeIndexes({int? deletedVid}) {
+    final names = _nodeIndexes.keys.toList();
+    for (final name in names) {
+      final idx = _nodeIndexes[name];
+      if (idx == null) continue;
+      final spec = idx.spec;
+      final kind = spec.kind;
+      if (kind is EqualityRange &&
+          kind.incremental &&
+          !kind.unique &&
+          deletedVid != null &&
+          idx is IntEqualityRangeIndex) {
+        idx.removeVid(deletedVid);
+        continue;
+      }
+      if (kind is EqualityRange && kind.deferred && !kind.unique) {
+        _pendingNodeIndexFlush.add(spec.name);
+      } else {
+        _nodeIndexes.remove(spec.name);
+        createNodePropertyIndex(spec);
+      }
+    }
+  }
+
+  /// Number of deferred index rebuilds currently queued. Tests +
+  /// observability use this; v1 doesn't expose a stream.
+  int get pendingDeferredIndexUpdates => _pendingNodeIndexFlush.length;
+
+  /// Async drain that uses [indexRebuildCoordinator] when set,
+  /// falling back to the synchronous main-isolate rebuild otherwise
+  /// (plan §14 Phase 5B+). Worker-supported column types route
+  /// through `PersistentWorker.send(...)`; unsupported types fall
+  /// back per-index to the sync rebuild path so a mixed workload
+  /// keeps making progress.
+  Future<void> flushDeferredIndexUpdatesAsync() async {
+    if (_pendingNodeIndexFlush.isEmpty) return;
+    final coord = indexRebuildCoordinator;
+    if (coord == null) {
+      flushDeferredIndexUpdates();
+      return;
+    }
+    final pending = List<String>.of(_pendingNodeIndexFlush);
+    _pendingNodeIndexFlush.clear();
+    for (final name in pending) {
+      final idx = _nodeIndexes[name];
+      if (idx == null) continue;
+      final spec = idx.spec;
+      final kind = spec.kind;
+      if (idx is IntEqualityRangeIndex && kind is EqualityRange) {
+        // Snapshot the column on the main isolate, ship to worker.
+        final pairs = <(int, int)>[];
+        nodeProps.forEachSetInt(
+          spec.keyId,
+          (vid, value) => pairs.add((vid, value)),
+        );
+        final snap = snapshotIntColumn(pairs: pairs);
+        final rebuilt = await coord.rebuildInt(
+          IndexRebuildIntTask.copyAndWrap(
+            spec: spec,
+            hashOverlay: kind.hashOverlay,
+            values: snap.values,
+            vids: snap.vids,
+          ),
+        );
+        _nodeIndexes[name] = buildIntIndexFromSorted(
+          spec: spec,
+          sortedValues: rebuilt.sortedValues,
+          sortedVids: rebuilt.sortedVids,
+          hashOverlay: kind.hashOverlay,
+        );
+      } else {
+        // Worker doesn't yet support this column type — fall back to
+        // a sync main-isolate rebuild.
+        _nodeIndexes.remove(name);
+        createNodePropertyIndex(spec);
+      }
+    }
+  }
+
+  /// Drains the deferred-update queue (plan §14 Phase 5B). Each
+  /// queued index is dropped + rebuilt from the current state.
+  /// Multiple pending updates per index coalesce — the rebuild runs
+  /// once. Synchronous on the main isolate — see
+  /// [flushDeferredIndexUpdatesAsync] for the worker-isolate variant
+  /// that offloads the rebuild when [indexRebuildCoordinator] is set.
+  void flushDeferredIndexUpdates() {
+    if (_pendingNodeIndexFlush.isEmpty) return;
+    final pending = List<String>.of(_pendingNodeIndexFlush);
+    _pendingNodeIndexFlush.clear();
+    for (final name in pending) {
+      final idx = _nodeIndexes[name];
+      if (idx == null) continue;
+      final spec = idx.spec;
+      _nodeIndexes.remove(name);
+      createNodePropertyIndex(spec);
+    }
+  }
+
+  /// Returns the first vid carrying [value] in [idx], or `null` if
+  /// the value isn't indexed. O(log n) for sorted-array indexes
+  /// (binary search); skips the hash overlay for simplicity.
+  int? _findVidInIndex(SecondaryIndex idx, PropValue value) {
+    if (idx is IntEqualityRangeIndex && value is PropInt) {
+      final lo = idx.lowerBound(value.value);
+      final hi = idx.upperBound(value.value);
+      return lo < hi ? idx.vidAt(lo) : null;
+    }
+    if (idx is DoubleEqualityRangeIndex && value is PropDouble) {
+      final lo = idx.lowerBound(value.value);
+      final hi = idx.upperBound(value.value);
+      return lo < hi ? idx.vidAt(lo) : null;
+    }
+    if (idx is StringIdEqualityRangeIndex && value is PropInt) {
+      final lo = idx.lowerBound(value.value);
+      final hi = idx.upperBound(value.value);
+      return lo < hi ? idx.vidAt(lo) : null;
+    }
+    if (idx is StringEqualityRangeIndex && value is PropString) {
+      final lo = idx.lowerBound(value.value);
+      final hi = idx.upperBound(value.value);
+      return lo < hi ? idx.vidAt(lo) : null;
+    }
+    if (idx is BoolEqualityRangeIndex && value is PropBool) {
+      final (lo, hi) = idx.equalRange(value.value);
+      return lo < hi ? idx.vidAt(lo) : null;
+    }
+    return null;
+  }
 
   /// Removes an edge-property index from the registry. Returns the
   /// removed index, or `null` if no such index existed.

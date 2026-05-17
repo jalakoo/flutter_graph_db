@@ -20,12 +20,55 @@ class EqualityRange extends IndexKind {
   /// equality dominates the workload.
   final bool hashOverlay;
 
-  const EqualityRange({this.hashOverlay = false});
+  /// When `true`, the index enforces value uniqueness — a mutation
+  /// that would create a second `(value, vid)` pair with the same
+  /// value (and a different vid) throws `ConstraintViolation` (plan
+  /// §3.3 / §14 Phase 5). Unique indexes update synchronously; the
+  /// deferred (worker-isolate) path is reserved for non-unique
+  /// indexes only.
+  final bool unique;
+
+  /// When `true` AND `unique` is `false`, mutations queue an update
+  /// instead of rebuilding the index inline (plan §3.3 hybrid
+  /// strategy / §14 Phase 5B). Callers drain pending updates by
+  /// calling `state.flushDeferredIndexUpdates()` before any read that
+  /// must see the latest state. Worker-isolate offload of the actual
+  /// rebuild is Phase 5+ polish — today's flush runs synchronously
+  /// but coalesces multiple updates into one rebuild per index.
+  final bool deferred;
+
+  /// When `true`, the index supports O(1) in-place `insert(vid, value)`
+  /// / `removeVid(vid)` for the typed concrete classes that implement
+  /// it (Phase 5 ships `int_`; other types extend the pattern).
+  /// Equality lookups stay O(1) via the always-on hash overlay; range
+  /// lookups lazily re-sort on first call after a mutation. Pays
+  /// extra memory for the permanent hash + vid↔value maps (~3×
+  /// the immutable index footprint on int columns).
+  final bool incremental;
+
+  /// Hint to the persistence layer (plan §14 Phase 5C). When
+  /// `priority: high` the index is intended to be persisted
+  /// alongside the engine snapshot (Phase 6) so a fresh open does
+  /// not pay the rebuild cost. Default rebuilds on startup. The
+  /// flag is honoured by `IndexSpec.priority`; **the actual
+  /// persistence wiring lands with Phase 6 snapshots** and is
+  /// tracked separately.
+  const EqualityRange({
+    this.hashOverlay = false,
+    this.unique = false,
+    this.deferred = false,
+    this.incremental = false,
+  });
 
   @override
   String toString() =>
-      'EqualityRange(hashOverlay: $hashOverlay)';
+      'EqualityRange(hashOverlay: $hashOverlay, unique: $unique)';
 }
+
+/// Persistence priority (plan §14 Phase 5C). `low` (default) rebuilds
+/// on startup; `high` persists alongside the engine snapshot
+/// (snapshot integration ships with Phase 6).
+enum IndexPriority { low, high }
 
 /// Registers an index with the engine. Single-property only in v1
 /// (composite deferred — plan §3.3).
@@ -41,13 +84,18 @@ class IndexSpec {
   /// Index kind. v1 ships [EqualityRange] only.
   final IndexKind kind;
 
+  /// Persistence priority (plan §14 Phase 5C). Default [IndexPriority.low].
+  final IndexPriority priority;
+
   const IndexSpec({
     required this.name,
     required this.keyId,
     required this.kind,
+    this.priority = IndexPriority.low,
   });
 
   @override
   String toString() =>
-      'IndexSpec(name: $name, keyId: $keyId, kind: $kind)';
+      'IndexSpec(name: $name, keyId: $keyId, kind: $kind, '
+      'priority: ${priority.name})';
 }

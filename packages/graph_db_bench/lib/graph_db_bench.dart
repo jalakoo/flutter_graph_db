@@ -5,6 +5,7 @@ library;
 
 export 'src/gc_signal.dart';
 export 'src/hub_seeds.dart';
+export 'src/index_bench.dart';
 export 'src/latency.dart';
 export 'src/rmat.dart';
 export 'src/runner.dart';
