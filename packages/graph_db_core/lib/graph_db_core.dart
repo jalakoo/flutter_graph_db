@@ -1,4 +1,4 @@
-/// Core engine of the Flutter-native graph database (`4_PLAN.md`).
+/// Core engine of the Flutter-native graph database.
 ///
 /// The public surface is tiered:
 ///

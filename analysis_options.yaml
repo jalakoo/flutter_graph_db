@@ -7,7 +7,7 @@ linter:
   rules:
     # Hot-path code prioritises explicit loops over functional sugar.
     prefer_foreach: false
-    # Mutable per-isolate state is core to the design (§2.3); the lint
-    # noise it generates is not actionable here.
+    # Mutable per-isolate state is core to the design; the lint noise
+    # it generates is not actionable here.
     prefer_const_constructors: false
     prefer_const_declarations: false

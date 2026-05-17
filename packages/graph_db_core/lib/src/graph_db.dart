@@ -23,18 +23,16 @@ import 'transaction.dart';
 import 'wal_op.dart';
 import 'wal_sink.dart';
 
-/// Public facade over the engine (plan §7.1).
+/// Public facade over the engine.
 ///
-/// Phase-1 entry points only — there are no mutations and no
-/// persistence here yet. Future phases add `GraphDb.open(path: ...)` for
-/// WAL-backed durability, `runInTransaction` for writes, and
-/// `executeQuery` for GQL. The read API surfaced here is the locked
-/// design from plan §5: the **primitive range** layer is the core, with
-/// a callback-based "for each" sugar layer on top.
+/// Hosts the read API, the transaction surface, and the WAL/durability
+/// wiring. The read API is the locked design: the **primitive range**
+/// layer is the core, with a callback-based "for each" sugar layer on
+/// top.
 class GraphDb {
   final MutableGraphState _state;
 
-  /// Optional WAL sink (plan §2.2). When non-null, every committed
+  /// Optional WAL sink. When non-null, every committed
   /// transaction's sequenced ops are appended through this sink with
   /// [Durability.fsync] before the applicator mutates state. When
   /// null, the engine runs purely in-memory (tests + the read-only
@@ -43,16 +41,16 @@ class GraphDb {
 
   /// `InternString` ops queued between transactions, flushed at the
   /// front of the next commit so recovery sees the catalog growth in
-  /// the order it was applied (plan §3.5, §6.4).
+  /// the order it was applied.
   final List<InternString> _pendingInterns = [];
 
   GraphDb._(this._state, [this._sink]);
 
-  /// Wraps an already-built [MutableGraphState] — the Phase-1 entry
-  /// point. Fixture loaders (e.g. `SocialGraph.build()` from
-  /// `package:graph_db_core/samples.dart`) hand back a [GraphDb] this way.
+  /// Wraps an already-built [MutableGraphState]. Fixture loaders (e.g.
+  /// `SocialGraph.build()` from `package:graph_db_core/samples.dart`)
+  /// hand back a [GraphDb] this way.
   ///
-  /// Pass [sink] to enable WAL writes on commit (Phase 2C). The sink
+  /// Pass [sink] to enable WAL writes on commit. The sink
   /// is closed by [close]. `graph_db_wal`'s `WalWriter` is the
   /// production-grade implementation.
   factory GraphDb.fromState(MutableGraphState state, {WalSink? sink}) =>
@@ -74,13 +72,11 @@ class GraphDb {
     await _sink?.close();
   }
 
-  /// Underlying state — for advanced callers and tests. The public API
-  /// here covers the documented Phase-1 surface; Phase 2 will lock this
-  /// behind the transaction model.
+  /// Underlying state — for advanced callers and tests.
   MutableGraphState get state => _state;
 
   /// CSR — exposed so callers writing extremely tight loops can index
-  /// the typed arrays directly (plan §5 primitive layer).
+  /// the typed arrays directly.
   Csr get csr => _state.csr;
 
   // ---------------------------------------------------------------- catalog
@@ -150,7 +146,7 @@ class GraphDb {
   int labelOf(Vid vid) => _state.csr.labelOf[vid.value];
 
   // ------------------------------------------------------------- traversal
-  // Primitive range API — allocation-free, fastest on AOT (Spike A).
+  // Primitive range API — allocation-free, fastest on AOT.
 
   int outRangeStart(Vid vid) => _state.outStart(vid);
   int outRangeEnd(Vid vid) => _state.outEnd(vid);
@@ -167,8 +163,7 @@ class GraphDb {
   /// Callback sugar — invokes [visit] for each out-edge of [vid].
   ///
   /// Hoist [visit] to a top-level function or a field-bound closure to
-  /// keep this path allocation-free (Spike A: callback shape is
-  /// gc/op 0.000 when the closure is prebuilt).
+  /// keep this path allocation-free.
   void forEachOutNeighbor(
     Vid vid,
     void Function(Vid dst, Eid eid, int edgeType) visit,
@@ -244,7 +239,7 @@ class GraphDb {
   PropValue? getEdgeProp(Eid eid, int keyId) =>
       _state.edgeProps.getBoxed(eid.value, keyId);
 
-  // ----- Transactions (plan §2.1, §6.4 / §14 Phase 2B) --------------------
+  // ----- Transactions --------------------
 
   /// Runs [body] inside a transaction.
   ///
@@ -255,15 +250,15 @@ class GraphDb {
   ///
   /// On any throw, rolls back: the buffer is dropped and the state
   /// is untouched. **Allocated vids / eids are still consumed** —
-  /// plan §3.6 (ids never reused). The exception propagates.
+  /// (ids never reused). The exception propagates.
   ///
-  /// Single-writer model (plan §2.3): nested + concurrent
+  /// Single-writer model: nested + concurrent
   /// `runTransaction` calls throw [StateError].
   ///
   /// Empty transactions (body queued no ops) are skipped — no `BeginTxn`
   /// / `CommitTxn` are emitted, no LSNs consumed.
   /// [durability] — per-call override of the engine default
-  /// (plan §6.7). Defaults to [Durability.group]: this commit lands
+  ///. Defaults to [Durability.group]: this commit lands
   /// in the next group-fsync window (1 ms by default). Pass
   /// [Durability.fsync] for a per-commit fsync. Tests that want to
   /// avoid the group-window wait can pass [Durability.fsync] or
@@ -271,9 +266,9 @@ class GraphDb {
   ///
   /// [capturePrevValues] — when `true`, `setNodeProp` / `setEdgeProp`
   /// inside the txn auto-capture the current value into the WAL op's
-  /// `prevValue` field (plan §6.4 / §14 Phase 2F). Off by default —
-  /// each capture costs a `getBoxed` allocation. Enable for audit
-  /// trails or simpler sync conflict detection.
+  /// `prevValue` field. Off by default — each capture costs a `getBoxed`
+  /// allocation. Enable for audit trails or simpler sync conflict
+  /// detection.
   Future<T> runTransaction<T>(
     FutureOr<T> Function(Transaction txn) body, {
     Durability durability = Durability.group,
@@ -282,7 +277,7 @@ class GraphDb {
     if (_state.activeTxnId != null) {
       throw StateError(
           'a transaction (txnId=${_state.activeTxnId}) is already in '
-          'flight — Phase 2B is single-writer (plan §2.3)');
+          'flight — the engine is single-writer');
     }
     final txnId = _state.allocTxnId();
     _state.activeTxnId = txnId;
@@ -297,7 +292,7 @@ class GraphDb {
       return result;
     } catch (_) {
       // Rollback: drop the buffer. Allocated vids/eids are NOT
-      // released — plan §3.6 monotonic identity.
+      // released monotonic identity.
       rethrow;
     } finally {
       _terminate(txn);
@@ -341,7 +336,7 @@ class GraphDb {
     // Durability gate: write to the WAL first. If the sink throws,
     // state is left unchanged (the txn effectively rolls back). The
     // sink coalesces the per-op fsync into a single durability ack
-    // per the requested mode (plan §6.7).
+    // per the requested mode.
     if (_sink != null) {
       await _sink.appendBatch(ops, durability: durability);
     }
@@ -353,9 +348,8 @@ class GraphDb {
       apply(_state, seq, recovery: false);
     }
     _pendingInterns.clear();
-    // After applying, check the overlay merge threshold (plan §14
-    // Phase 2E). Uses the worker isolate when a coordinator is wired
-    // (plan §14 Phase 2 polish — Spike B port), otherwise falls back
+    // After applying, check the overlay merge threshold. Uses the
+    // worker isolate when a coordinator is wired, otherwise falls back
     // to the synchronous main-isolate fold.
     await _state.maybeMergeOverlayAsync();
   }
@@ -366,12 +360,11 @@ class GraphDb {
     }
   }
 
-  // ----- Phase 6A: observable LSN ------------------------------------------
-
+  // ----- observable LSN -----
   /// LSN of the most recently applied op. Foundation for snapshot
-  /// isolation (plan §14 Phase 6A) — readers can capture this and
-  /// later compare to know whether the engine has advanced. Full
-  /// pinning + MVCC enforcement is Phase 6B.
+  /// isolation — readers can capture this and later compare to know
+  /// whether the engine has advanced. Full pinning + MVCC enforcement
+  /// is a future layer.
   int get currentLsn => _state.nextLsn - 1;
 
   /// Current next-LSN — the LSN the next committed op will receive.
@@ -379,7 +372,7 @@ class GraphDb {
 
   /// Active pins on this engine. Tests + tooling use this; v1
   /// doesn't enforce isolation against the pin set, but future
-  /// MVCC (Phase 6B+) uses it to gate version retention.
+  /// MVCC uses it to gate version retention.
   final Set<LsnPin> _activePins = {};
   int get activePinCount => _activePins.length;
 
@@ -400,15 +393,14 @@ class GraphDb {
     return pin;
   }
 
-  // ----- Phase 6C: constraint catalog --------------------------------------
-
+  // constraint catalog
   /// Read-only handle to the engine's constraint catalog. Application
   /// code reads this to introspect active constraints; declare /
   /// drop go through `runTransaction` so the WAL records them and
   /// recovery rebuilds the catalog.
   ConstraintCatalog get constraints => _state.constraints;
 
-  // ----- Bulk write path (plan §14 Phase 2F) -------------------------------
+  // ----- Bulk write path -------------------------------
 
   /// Bulk edge import — bypasses the overlay and rebuilds the CSR
   /// directly with the new edges folded in. Single WAL transaction
@@ -418,7 +410,7 @@ class GraphDb {
   /// Use over a `runTransaction` loop when importing > a few thousand
   /// edges: the overlay path would trip the merge threshold mid-batch
   /// and pay multiple full-CSR rebuilds; this path pays exactly one.
-  /// Plan §14: "100k bulk-import in < 1s".
+  ///: "100k bulk-import in < 1s".
   ///
   /// **Properties are not supported in this path** — bulk insert is the
   /// happy path for topology import. Call `runTransaction` for any
@@ -430,7 +422,7 @@ class GraphDb {
     if (_state.activeTxnId != null) {
       throw StateError(
           'cannot bulkAddEdges while txnId=${_state.activeTxnId} is in '
-          'flight (plan §2.3 single-writer)');
+          'flight');
     }
     if (edges.isEmpty) return const [];
     final txnId = _state.allocTxnId();
@@ -524,9 +516,9 @@ class GraphDb {
     }
   }
 
-  // ----- Secondary indexes (plan §3.3) -------------------------------------
+  // ----- Secondary indexes -------------------------------------
 
-  /// Soft-budget size-event hook (plan §3.3). Default unset = silent.
+  /// Soft-budget size-event hook. Default unset = silent.
   /// Wire a logger or a test assertion sink here to be notified when
   /// a freshly-built index crosses the [kIndexSizeWarnThreshold]
   /// ratio of [Csr.sizeBytes]. Fired once per `createIndex()`.
@@ -534,9 +526,8 @@ class GraphDb {
 
   /// Builds a node-property index from the current state. Fires
   /// [onIndexSizeEvent] if the new index is at or above the soft
-  /// budget. Phase 1 is read-only — the index reflects the loaded
-  /// fixture and does not update with mutations (Phase 5 wires
-  /// incremental update).
+  /// budget. The default (non-incremental, non-deferred) index reflects
+  /// the loaded fixture and does not update with mutations.
   SecondaryIndex createNodePropertyIndex(IndexSpec spec) =>
       _state.createNodePropertyIndex(spec, onSizeEvent: onIndexSizeEvent);
 

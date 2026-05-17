@@ -1,12 +1,12 @@
 import 'dart:typed_data';
 
-/// Compressed Sparse Row topology, both directions (plan §3.1).
+/// Compressed Sparse Row topology, both directions.
 ///
-/// All arrays are `Uint32List` — the §3.1 web-compatibility decision
-/// (Spike B). Caps the graph at 2³² nodes / 2³² edges (effectively
+/// All arrays are `Uint32List` — the web-compatibility decision
+///. Caps the graph at 2³² nodes / 2³² edges (effectively
 /// unbounded on-device) and halves topology memory vs a 64-bit layout.
 /// Reverse arrays are **always built**; reverse-CSR correctness through
-/// a merge is spike-verified (§2.3).
+/// a merge is spike-verified.
 ///
 /// Edges within a row are sorted by `(srcVid, edgeType)` so a
 /// type-filtered traversal is a binary search + range scan (future).
@@ -40,8 +40,8 @@ class Csr {
   final Uint32List edgeIdIn;
   final Uint32List edgeTypeIn;
 
-  // ----- Labels (single-label-per-node in v0; multi-label is a Phase 1.1
-  // refinement per plan §6.4) -------------------------------------------------
+  // ----- Labels (single-label-per-node in v0; multi-label is a a future
+  // refinement) -------------------------------------------------
 
   /// Length `nodeCount`. One label id per node.
   final Uint32List labelOf;
@@ -191,7 +191,7 @@ class Csr {
   /// In-degree of [vid].
   int inDegree(int vid) => rowPtrIn[vid + 1] - rowPtrIn[vid];
 
-  /// Total bytes occupied by the topology arrays (plan §3.3 size budget).
+  /// Total bytes occupied by the topology arrays.
   ///
   /// Counts `rowPtr` + `colIdx` + `edgeId` + `edgeType` (both directions)
   /// + `labelOf` + the per-label `labelIndex` arrays. Each `Uint32List`

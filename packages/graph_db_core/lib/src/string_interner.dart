@@ -1,4 +1,4 @@
-/// What kind of string is being interned (plan §3.5, §6.4).
+/// What kind of string is being interned.
 ///
 /// Each kind has its own monotonic id space — a label id and a property
 /// key id with the same numeric value refer to different things.
@@ -23,7 +23,7 @@ class _Space {
 }
 
 /// Global string-table for labels, edge types, property keys
-/// (plan §3.5). Monotonic per kind; never reused.
+///. Monotonic per kind; never reused.
 ///
 /// Property *values* of type `String` are NOT interned here — unbounded
 /// cardinality. (The columnar store may intern low-cardinality string

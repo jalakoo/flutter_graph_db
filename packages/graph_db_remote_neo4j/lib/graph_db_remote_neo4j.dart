@@ -1,6 +1,5 @@
 /// Neo4j adapter — Bolt v4/v5 over `dart:io` `Socket` /
-/// `SecureSocket` implementing [`RemoteGraphClient`] (plan §9 /
-/// §14 Phase 4B–4C).
+/// `SecureSocket` implementing [`RemoteGraphClient`].
 library;
 
 export 'src/bolt/chunking.dart' show ChunkDecoder, frameMessage;

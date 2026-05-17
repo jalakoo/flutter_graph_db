@@ -1,4 +1,4 @@
-/// LRU plan cache (plan §8 / §14 Phase 3F).
+/// LRU plan cache.
 ///
 /// Caches the parser + planner output keyed by the raw query string.
 /// The cache is per-`GraphDb` (attached via an `Expando`) — different
@@ -8,7 +8,7 @@ library;
 
 import 'plan/logical_plan.dart';
 
-/// Default cache size per plan §8.
+/// Default cache size
 const int kDefaultPlanCacheSize = 64;
 
 class _LruEntry {
@@ -20,7 +20,7 @@ class _LruEntry {
 }
 
 /// Simple intrusive doubly-linked-list LRU. Not isolate-safe (the
-/// engine is single-writer per plan §2.3).
+/// engine is single-writer).
 class GqlPlanCache {
   final int maxEntries;
   final Map<String, _LruEntry> _map = {};

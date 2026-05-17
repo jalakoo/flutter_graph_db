@@ -1,4 +1,4 @@
-/// Cypher recursive-descent parser (plan §8 / §14 Phase 3A).
+/// Cypher recursive-descent parser.
 ///
 /// v1 read subset:
 /// ```
@@ -14,7 +14,7 @@ library;
 import 'ast.dart';
 import 'lexer.dart';
 
-/// Parse-time error with the §8-spec format: line + column + offending
+/// Parse-time error with a tight format: line + column + offending
 /// token + 1-line context. No stack trace (caller fault, not engine bug).
 class GqlParseException implements Exception {
   final String message;
@@ -293,8 +293,7 @@ class GqlParser {
         // Multi-type (`:A|B`) deferred — error if seen.
         if (_peek().kind == TokenKind.pipe) {
           throw _error(
-            'multi-type relationship (TYPE1|TYPE2) lands in a later '
-            'Phase 3 sub-phase',
+            'multi-type relationship (TYPE1|TYPE2) is not yet supported',
             _peek(),
           );
         }
@@ -542,7 +541,7 @@ class GqlParser {
         final ident = _advance();
         // Function-call shape: IDENT(...). v1 recognises only the six
         // aggregates; other function calls (e.g. `size()`,
-        // `coalesce()`) land with Cypher-compat mode (Phase 3F).
+        // `coalesce()`) land with Cypher-compat mode.
         if (_peek().kind == TokenKind.lparen) {
           return _parseFunctionCall(ident.lexeme);
         }
@@ -597,7 +596,7 @@ class GqlParser {
           msg: 'expected ) to close $upper(...)');
       return AggregateExpr(fn: fn, argument: arg);
     }
-    // Cypher-compat scalar functions (plan §8 / Phase 3F).
+    // Cypher-compat scalar functions.
     BuiltinFn? scalar;
     switch (upper) {
       case 'SIZE':

@@ -1,15 +1,15 @@
-/// One remote destination the sync engine ships to (plan §10).
+/// One remote destination the sync engine ships to.
 ///
 /// A target wraps a [RemoteGraphClient] with the per-destination
 /// bookkeeping the engine needs: the high-water-mark LSN it has
 /// already shipped past, and a quarantine queue for ops the remote
-/// rejected (plan §10 + §14 Phase 7).
+/// rejected.
 library;
 
 import 'package:graph_db_core/graph_db_core.dart';
 import 'package:graph_db_remote/graph_db_remote.dart';
 
-/// Mode for the initial sync against a fresh target (plan §14 Phase 7G).
+/// Mode for the initial sync against a fresh target.
 enum SeedingMode {
   /// The target already contains a compatible snapshot of the graph
   /// — start streaming from the current local HWM.
@@ -46,9 +46,9 @@ class SyncTarget {
 
   /// LSN of the last op successfully shipped + acknowledged by the
   /// remote. v1 keeps this in memory; persistence is the next polish
-  /// step (typically alongside Phase 6D snapshots — write the HWM
-  /// into the snapshot meta so a recovered engine resumes where it
-  /// left off).
+  /// step (typically alongside engine snapshots — write the HWM into
+  /// the snapshot meta so a recovered engine resumes where it left
+  /// off).
   int hwm = -1;
 
   /// Whether the target has been seeded (no-op for [SeedingMode.incremental]).

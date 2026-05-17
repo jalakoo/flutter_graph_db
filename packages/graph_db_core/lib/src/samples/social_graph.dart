@@ -9,9 +9,8 @@ import '../mutable_graph_state.dart';
 /// `worksAt` / `founded` edges and `name` / `age` / `title` / `founded`
 /// properties.
 ///
-/// Phase 1: the fixture loads through [MutableGraphState.fromFixture] and
-/// the property store accessors. Phase 2 will rebuild this through the
-/// WAL applicator so the same fixture exercises the mutation path.
+/// The fixture loads through [MutableGraphState.fromFixture] and
+/// the property store accessors.
 class SocialGraph {
   final GraphDb db;
 

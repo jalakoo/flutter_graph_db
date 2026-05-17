@@ -1,4 +1,4 @@
-/// Input to `GraphDb.bulkAddEdges` (plan §14 Phase 2F).
+/// Input to `GraphDb.bulkAddEdges`.
 library;
 
 import 'ids.dart';

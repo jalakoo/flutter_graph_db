@@ -18,17 +18,16 @@ import 'secondary_index/secondary_index.dart';
 import 'string_interner.dart';
 import 'wal_op.dart' show ConstraintKind;
 
-/// The composed in-memory state the engine reads from (plan §2.1).
+/// The composed in-memory state the engine reads from.
 ///
-/// Phase 1: built once from a fixture via [MutableGraphState.fromFixture]
-/// and read-only thereafter. Phase 2 adds the mutation path — the
-/// `apply(WalOp)` applicator, the delta overlay, and the WAL.
+/// Built once from a fixture via [MutableGraphState.fromFixture], with
+/// the mutation path layered on top via the `apply(WalOp)` applicator,
+/// the delta overlay, and the WAL.
 ///
 /// Read primitives live here as thin wrappers over the underlying [Csr]
 /// + [PropertyStore]. The `outRangeStart` / `outRangeEnd` pair is the
-/// **primitive range read API** that Spike A picked as the v1 read
-/// shape (plan §5, §7.1) — allocation-free, the simplest, and the
-/// fastest on AOT.
+/// **primitive range read API** — allocation-free, the simplest, and
+/// the fastest on AOT.
 class MutableGraphState {
   final StringInterner strings;
   Csr _csr;
@@ -37,9 +36,9 @@ class MutableGraphState {
   final DeltaOverlay overlay;
 
   /// Current CSR. Re-bound by [installMergedCsr] when the overlay
-  /// folds into a fresh CSR (plan §3.4 / §14 Phase 2E). Callers that
-  /// cache the reference across an `await` should re-read after the
-  /// await — same shape as `state.csr` outside a transaction.
+  /// folds into a fresh CSR. Callers that cache the reference across
+  /// an `await` should re-read after the await — same shape as
+  /// `state.csr` outside a transaction.
   Csr get csr => _csr;
 
   /// Eid -> source vid (within the CSR base only). Rebuilt by
@@ -53,29 +52,27 @@ class MutableGraphState {
   Uint32List _baseCsrEidToDst;
   Uint32List get baseCsrEidToDst => _baseCsrEidToDst;
 
-  /// Soft merge trigger override (plan §14 Phase 2E). When `null`,
-  /// the formula `max(10_000, 5 % of csr.edgeCount)` is used per
-  /// §3.4. Tests set a small value to force a merge after a handful
-  /// of mutations.
+  /// Soft merge trigger override. When `null`, the formula
+  /// `max(10_000, 5 % of csr.edgeCount)` is used. Tests set a small
+  /// value to force a merge after a handful of mutations.
   int? mergeThreshold;
 
-  /// Optional worker-isolate merge coordinator (plan §2.3 / §14
-  /// Phase 2 polish). When set, [maybeMergeOverlayAsync] hands the
-  /// fold off to the worker and the main-isolate stall is only the
-  /// copy + install cost. When `null`, the same call falls back to
-  /// the synchronous [mergeNow] path. Set via
-  /// `MergeCoordinator.spawn()` and assign before any merge would
-  /// fire.
+  /// Optional worker-isolate merge coordinator. When set,
+  /// [maybeMergeOverlayAsync] hands the fold off to the worker and
+  /// the main-isolate stall is only the copy + install cost. When
+  /// `null`, the same call falls back to the synchronous [mergeNow]
+  /// path. Set via `MergeCoordinator.spawn()` and assign before any
+  /// merge would fire.
   MergeCoordinator? mergeCoordinator;
 
-  /// Optional worker-isolate index-rebuild coordinator (plan §14
-  /// Phase 5B+). When set, [flushDeferredIndexUpdatesAsync] hands
-  /// rebuilds off to the worker (supported column types only — int_
-  /// today; other types fall back to main-isolate rebuild). When
-  /// `null`, the same async call runs the rebuild inline.
+  /// Optional worker-isolate index-rebuild coordinator. When set,
+  /// [flushDeferredIndexUpdatesAsync] hands rebuilds off to the
+  /// worker (supported column types only — int_ today; other types
+  /// fall back to main-isolate rebuild). When `null`, the same async
+  /// call runs the rebuild inline.
   IndexRebuildCoordinator? indexRebuildCoordinator;
 
-  /// Constraint catalog (plan §4 / §14 Phase 6C). Rebuilt from the
+  /// Constraint catalog. Rebuilt from the
   /// WAL on recovery via the `DeclareConstraint` / `DropConstraint`
   /// ops. Application code reads this to introspect active
   /// constraints; mutations enforce against it automatically.
@@ -84,18 +81,19 @@ class MutableGraphState {
   int _nextVid;
   int _nextEid;
 
-  /// LSN assigned to the next [SequencedWalOp]. Phase 2B uses a simple
-  /// counter; Phase 2C replaces this with the WAL byte offset.
+  /// LSN assigned to the next [SequencedWalOp]. Today this is a
+  /// simple counter; a future variant may replace it with the WAL
+  /// byte offset.
   int _nextLsn;
 
-  /// Txn id assigned to the next transaction. Phase 2B counter; in
-  /// later phases the WAL header carries the highest txn id for
-  /// recovery to resume from.
+  /// Txn id assigned to the next transaction. A simple counter today;
+  /// future variants may have the WAL header carry the highest txn id
+  /// for recovery to resume from.
   int _nextTxnId;
 
   /// The currently-active txn id, or `null` if no txn is in flight.
-  /// Phase 2B single-writer (plan §2.3) — a second `runTransaction`
-  /// while [activeTxnId] is non-null throws.
+  /// The engine is single-writer — a second `runTransaction` while
+  /// [activeTxnId] is non-null throws.
   int? activeTxnId;
 
   MutableGraphState({
@@ -174,10 +172,10 @@ class MutableGraphState {
   /// Returns a fresh monotonic txn id and bumps the counter.
   int allocTxnId() => _nextTxnId++;
 
-  // ----- Merge trigger (plan §3.4, §14 Phase 2E) ---------------------------
+  // ----- Merge trigger ---------------------------
 
   /// Total overlay mutation count. Threshold metric for the merge
-  /// trigger (plan §14: `max(10_000, 5 %)`).
+  /// trigger`).
   int get overlayMutationCount =>
       overlay.addedEdges.length + overlay.deletedEdges.length;
 
@@ -191,11 +189,10 @@ class MutableGraphState {
       overlayMutationCount >= effectiveMergeThreshold;
 
   /// Folds [overlay] into a fresh CSR and installs it via
-  /// [installMergedCsr]. **Synchronous** main-isolate fold for v1 —
-  /// the worker-isolate hand-off (Spike B design) is a Phase 2 polish
-  /// follow-up; the merge-stall <1 ms acceptance metric requires it
-  /// for graphs much larger than the 100 k bench fixture (see
-  /// `4_PLAN.md` Phase 2 sub-table).
+  /// [installMergedCsr]. **Synchronous** main-isolate fold; the
+  /// worker-isolate hand-off is a follow-up — the merge-stall <1 ms
+  /// acceptance metric requires it for graphs much larger than the
+  /// 100 k bench fixture.
   void mergeNow() {
     if (overlay.isEmpty) return;
     final fresh = foldOverlayIntoCsr(base: _csr, overlay: overlay);
@@ -214,7 +211,7 @@ class MutableGraphState {
   /// Async variant — uses [mergeCoordinator] (worker isolate) when
   /// set, otherwise falls back to [mergeNow]. Main-isolate stall in
   /// the worker path is bounded by copy + install (the fold runs
-  /// off-main). Plan §14 acceptance metric: `< 1 ms` p99 stall.
+  /// off-main). acceptance metric: `< 1 ms` p99 stall.
   Future<bool> maybeMergeOverlayAsync() async {
     if (!shouldMerge) return false;
     final coord = mergeCoordinator;
@@ -296,7 +293,7 @@ class MutableGraphState {
     );
   }
 
-  // ----- Topology reads — primitive range API (plan §5, Spike A) -----------
+  // ----- Topology reads — primitive range API -----------
   //
   // Caller indexes the shared CSR arrays directly through the `at`
   // accessors. Allocation-free.
@@ -339,7 +336,7 @@ class MutableGraphState {
 
   static final Uint32List _emptyU32 = Uint32List(0);
 
-  // ----- Property reads — raw primitives (plan §3.2) -----------------------
+  // ----- Property reads — raw primitives -----------------------
 
   bool hasNodeProp(Vid vid, int keyId) =>
       nodeProps.has(vid.value, keyId);
@@ -367,7 +364,7 @@ class MutableGraphState {
   int getEdgeStringIdProp(Eid eid, int keyId) =>
       edgeProps.getStringId(eid.value, keyId);
 
-  // ----- Allocators (plan §3.6 — vid never reused) -------------------------
+  // ----- Allocators -------------------------
 
   /// Returns a fresh [Vid] and grows [nodeProps] so the new vid can
   /// hold properties. Bumps [nextVid]. Transaction builders call this
@@ -406,17 +403,17 @@ class MutableGraphState {
     }
   }
 
-  // ----- Mutation appliers (plan §2.1 — the single mutation path) ----------
+  // ----- Mutation appliers ----------
   //
   // These are the methods the applicator (`apply()`) routes WalOp arms
   // to. Transaction builders call [allocVid] / [allocEid] first to
   // assign ids, then construct the WalOp, then feed it through `apply`.
   //
-  // Phase 2A: writes land in the [DeltaOverlay] (or directly in
-  // [PropertyStore] for property ops, since the property store has no
-  // overlay layer — values are mutable in place). Phase 2C wires WAL
-  // persistence around these calls; Phase 2E wires the worker-isolate
-  // merge that folds the overlay back into the CSR base.
+  // Writes land in the [DeltaOverlay] (or directly in [PropertyStore]
+  // for property ops, since the property store has no overlay layer —
+  // values are mutable in place). The WAL sink persists these calls,
+  // and a worker-isolate merge folds the overlay back into the CSR
+  // base.
 
   /// Applies an `AddNode` WAL op. Fast-forwards [nextVid] so future
   /// allocations stay monotonic even when [vid] was minted elsewhere
@@ -430,7 +427,7 @@ class MutableGraphState {
     if (overlay.deletedNodes.contains(vid.value)) {
       throw ConstraintViolation(
           'cannot AddNode at vid ${vid.value}: already tombstoned '
-          '(vids are never reused — plan §3.6)');
+          '(vids are never reused)');
     }
     if (vid.value >= _nextVid) {
       _nextVid = vid.value + 1;
@@ -439,14 +436,14 @@ class MutableGraphState {
     if (labelIds.isEmpty) {
       throw ConstraintViolation(
           'AddNode requires at least one label id (v1 single-label '
-          'storage — multi-label is Phase 1.1)');
+          'storage — multi-label is a future)');
     }
     if (labelIds.length > 1) {
       throw ConstraintViolation(
           'AddNode given ${labelIds.length} labels; v1 is single-label '
-          '(plan §6.4 multi-label is Phase 1.1)');
+          '');
     }
-    // Existence-constraint pre-check (plan §14 Phase 6C) — fail
+    // Existence-constraint pre-check — fail
     // before any property writes so partial state isn't left behind.
     constraints.enforceExistenceOnAddNode(
       labelId: labelIds.first,
@@ -512,7 +509,7 @@ class MutableGraphState {
     if (added.length > 1 || removed.length > 1) {
       throw ConstraintViolation(
           'SetNodeLabels v1 single-label only (added=${added.length}, '
-          'removed=${removed.length}); multi-label is Phase 1.1');
+          'removed=${removed.length}); multi-label is a future');
     }
     if (!_nodeExists(vid.value)) {
       throw NotFoundException('SetNodeLabels on absent vid ${vid.value}');
@@ -642,11 +639,11 @@ class MutableGraphState {
       case PropMap():
         throw ConstraintViolation(
             'PropList / PropMap cannot be stored in a typed column '
-            '(plan §3.2). Decompose at the boundary.');
+            '. Decompose at the boundary.');
     }
   }
 
-  // ----- Overlay-aware reads (plan §2 — base + overlay) --------------------
+  // ----- Overlay-aware reads --------------------
 
   /// True if [vid] is a live node (not tombstoned, and either in the
   /// CSR base or in the overlay's added-nodes map).
@@ -735,11 +732,12 @@ class MutableGraphState {
     return n;
   }
 
-  // ----- Secondary index registry (plan §3.3) ------------------------------
+  // ----- Secondary index registry ------------------------------
   //
-  // Built once from the current column state — Phase 1 is read-only.
-  // Phase 5 will revisit incremental update + the deferred build via the
-  // §2.3 worker hand-off.
+  // Default (non-incremental, non-deferred) indexes are built once
+  // from the current column state and are read-only thereafter. The
+  // deferred + incremental variants (and the worker-isolate rebuild
+  // hand-off) sit alongside that baseline.
 
   final Map<String, SecondaryIndex> _nodeIndexes = {};
   final Map<String, SecondaryIndex> _edgeIndexes = {};
@@ -755,8 +753,8 @@ class MutableGraphState {
   /// Builds a node-property index from the current [nodeProps] column.
   ///
   /// Fires [onSizeEvent] **once** if the freshly-built index size is at
-  /// or above [kIndexSizeWarnThreshold] of [csr.sizeBytes] (plan §3.3
-  /// soft budget). [onSizeEvent] is optional; pass `null` (default) to
+  /// or above [kIndexSizeWarnThreshold] of [csr.sizeBytes] (soft
+  /// budget). [onSizeEvent] is optional; pass `null` (default) to
   /// silently build.
   ///
   /// Throws [ConstraintViolation] if an index named [IndexSpec.name]
@@ -855,8 +853,7 @@ class MutableGraphState {
   /// removed index, or `null` if no such index existed.
   SecondaryIndex? dropNodeIndex(String name) => _nodeIndexes.remove(name);
 
-  // ----- Phase 5 mutation hooks (plan §14 Phase 5A) -----------------------
-
+  // mutation hooks
   /// Throws [ConstraintViolation] if [value] is already present on a
   /// different vid in any unique node-property index covering [keyId].
   void _enforceUniqueNodeIndex(int vid, int keyId, PropValue value) {
@@ -875,11 +872,11 @@ class MutableGraphState {
   /// Names of indexes queued for a deferred rebuild — populated by
   /// the mutation hook for any index whose spec has
   /// `EqualityRange.deferred == true`. Drained by
-  /// [flushDeferredIndexUpdates] (plan §14 Phase 5B).
+  /// [flushDeferredIndexUpdates].
   final Set<String> _pendingNodeIndexFlush = {};
 
-  /// Updates every node index whose `keyId` matches [keyId] (plan
-  /// §14 Phase 5). Strategy per-index:
+  /// Updates every node index whose `keyId` matches [keyId]. Strategy
+  /// per-index:
   /// - **incremental + non-unique**: O(1) `insert(vid, value)` /
   ///   `removeVid(vid)` directly on the index (currently `int_`
   ///   columns only — other typed columns fall back to rebuild).
@@ -961,7 +958,7 @@ class MutableGraphState {
 
   /// Async drain that uses [indexRebuildCoordinator] when set,
   /// falling back to the synchronous main-isolate rebuild otherwise
-  /// (plan §14 Phase 5B+). Worker-supported column types route
+  ///. Worker-supported column types route
   /// through `PersistentWorker.send(...)`; unsupported types fall
   /// back per-index to the sync rebuild path so a mixed workload
   /// keeps making progress.
@@ -1010,7 +1007,7 @@ class MutableGraphState {
     }
   }
 
-  /// Drains the deferred-update queue (plan §14 Phase 5B). Each
+  /// Drains the deferred-update queue. Each
   /// queued index is dropped + rebuilt from the current state.
   /// Multiple pending updates per index coalesce — the rebuild runs
   /// once. Synchronous on the main isolate — see
@@ -1029,7 +1026,7 @@ class MutableGraphState {
     }
   }
 
-  // ----- Constraint catalog mutation hooks (plan §14 Phase 6C) -------------
+  // ----- Constraint catalog mutation hooks -------------
 
   /// Registers a constraint via the catalog. Called by the
   /// applicator on `DeclareConstraint` and by the public
@@ -1053,7 +1050,7 @@ class MutableGraphState {
     _validateConstraintAgainstExistingData(spec);
     constraints.declare(spec);
     // Auto-create an underlying unique index so per-mutation
-    // enforcement comes for free via the Phase 5 unique path.
+    // enforcement comes for free via the unique-index path.
     // v1 limitation: the index is global across all labels (doesn't
     // honour [spec.labelId]) — a property uniqueness scoped to one
     // label is enforced only at declare-time validation, not on

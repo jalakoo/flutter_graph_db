@@ -16,10 +16,10 @@ import '../data/graph_data.dart';
 /// directory so changes survive a relaunch. Mutations are synchronous
 /// in-memory; the JSON write is fire-and-forget.
 ///
-/// This is the example's stand-in for the real `graph_db_wal` (plan §6):
+/// This is the example's stand-in for the real `graph_db_wal`:
 /// JSON instead of CBOR, no WAL framing, snapshot-on-every-mutation
-/// instead of append-only. Production callers will swap this layer for
-/// the WAL-backed `GraphDb.open(path: ...)` once Phase 2 lands.
+/// instead of append-only. Production callers should swap this layer
+/// for the WAL-backed `GraphDb.open(path: ...)` flow.
 class GraphRepository extends ChangeNotifier {
   static const String _fileName = 'graph_db_example_v1.json';
 
@@ -116,7 +116,7 @@ class GraphRepository extends ChangeNotifier {
   }
 
   /// Deletes a node (Person or Company) and cascades all incident edges
-  /// — matches plan §3.6 ("monotonic from 0, never reused on delete").
+  /// — matches ("monotonic from 0, never reused on delete").
   void deleteNode(Vid vid) {
     final n = _data.nodes[vid.value];
     if (n.deleted) return;

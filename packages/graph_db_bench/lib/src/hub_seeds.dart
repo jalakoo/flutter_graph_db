@@ -8,7 +8,7 @@ import 'package:graph_db_core/graph_db_core.dart';
 /// ~1) random seeds mostly hit degree-0/1 nodes, so the traversal inner
 /// loop barely runs and the benchmark measures per-call overhead instead
 /// of per-element cost. Hub seeds make the inner loop actually run deep
-/// — Spike A finding (the §15 acceptance note pins this in).
+///.
 Uint32List topOutDegreeVids(Csr csr, int count) {
   final vids = Uint32List(csr.nodeCount);
   for (var v = 0; v < csr.nodeCount; v++) {

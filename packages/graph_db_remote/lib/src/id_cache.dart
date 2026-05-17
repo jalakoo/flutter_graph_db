@@ -1,4 +1,4 @@
-/// `logicalId` ↔ `remoteId` LRU cache (plan §9.8).
+/// `logicalId` ↔ `remoteId` LRU cache.
 ///
 /// Adapters populate the cache from query results — every
 /// [`RemoteNode`] / [`RemoteEdge`] carries both ids. Subsequent
@@ -8,9 +8,9 @@
 /// optimisation, not a user-facing surface.
 ///
 /// Single intrusive LRU shared by both directions; the cache is
-/// bounded by [maxEntries] (default 100 k per plan §9.8). Eviction
+/// bounded by [maxEntries] (default 100 k). Eviction
 /// removes the oldest pair from both maps. Invalidated by adapters
-/// on `bulkImport` and by a public `reset()` (plan §9.8).
+/// on `bulkImport` and by a public `reset()`.
 library;
 
 class _LruEntry {
@@ -21,7 +21,7 @@ class _LruEntry {
   _LruEntry({required this.logicalId, required this.remoteId});
 }
 
-/// Default LRU size per plan §9.8.
+/// Default LRU size
 const int kDefaultIdCacheSize = 100000;
 
 class IdTranslationCache {
@@ -80,7 +80,7 @@ class IdTranslationCache {
     if (_byLogical.length > maxEntries) _evictTail();
   }
 
-  /// Plan §9.8 explicit reset — typically called after
+  /// explicit reset — typically called after
   /// `bulkImport` invalidates every cached mapping.
   void reset() {
     _byLogical.clear();

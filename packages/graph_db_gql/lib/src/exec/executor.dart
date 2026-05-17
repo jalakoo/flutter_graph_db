@@ -1,10 +1,9 @@
-/// Push-based stream executor (plan §8 / §14 Phase 3B).
+/// Push-based stream executor.
 ///
 /// Each [LogicalPlan] case becomes a `Stream<ResultRow>` generator
 /// that consumes its source stream and emits transformed rows. The
 /// composition is purely sequential — no batching, no parallelism in
-/// v1; the 100-row batching mentioned in §8 is a later sub-phase
-/// optimisation.
+/// v1; row-batching is a later optimisation.
 library;
 
 import 'package:graph_db_core/graph_db_core.dart';

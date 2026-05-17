@@ -1,4 +1,4 @@
-/// Bulk import + export op shape (plan §9.3 + §9.1).
+/// Bulk import + export op shape.
 ///
 /// `bulkImport` consumes a `Stream<ImportOp>` — adapters translate
 /// these into backend-native bulk-load formats (CSV for Neo4j Admin

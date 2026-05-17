@@ -1,4 +1,4 @@
-/// Remote adapter error hierarchy (plan §9).
+/// Remote adapter error hierarchy.
 ///
 /// Every adapter — Bolt, RESP, future REST / gRPC / etc. — maps its
 /// wire-level errors into this hierarchy. Application code catches by
@@ -63,8 +63,7 @@ final class UnavailableException extends RemoteException {
 }
 
 /// The operation isn't supported by this backend. Adapters surface
-/// these proactively — e.g. FalkorDB rejecting parallel edges per
-/// plan §14 Phase 4 acceptance.
+/// these proactively — e.g. FalkorDB rejecting parallel edges.
 final class UnsupportedOperationException extends RemoteException {
   const UnsupportedOperationException(super.message, {super.cause});
 }

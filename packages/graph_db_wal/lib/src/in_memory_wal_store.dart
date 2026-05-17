@@ -5,10 +5,10 @@ import 'package:graph_db_core/graph_db_core.dart';
 
 import 'wal_store.dart';
 
-/// In-memory [WalStore] adapter. Used for tests, on web (until the
-/// IndexedDB adapter lands in Phase 8), and as the in-memory fixture
-/// the integration suite uses for crash-injection and recovery tests
-/// without touching disk (plan §2.2).
+/// In-memory [WalStore] adapter. Used for tests, on web (until an
+/// IndexedDB adapter lands), and as the in-memory fixture the
+/// integration suite uses for crash-injection and recovery tests
+/// without touching disk.
 class InMemoryWalStore implements WalStore {
   final List<Uint8List> _chunks = [];
   int _length = 0;

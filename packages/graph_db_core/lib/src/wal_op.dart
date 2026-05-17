@@ -2,16 +2,16 @@ import 'ids.dart';
 import 'prop_value.dart';
 import 'string_interner.dart';
 
-/// One operation in the write-ahead log (plan §6.4).
+/// One operation in the write-ahead log.
 ///
 /// **Sealed.** The compiler enforces exhaustive `switch` in the
-/// applicator (§2.1), the recovery scan (§6.5), and any future sync
+/// applicator, the recovery scan, and any future sync
 /// adapter — adding a new operation here is a compile error everywhere
 /// it must be handled.
 ///
 /// **Unsequenced.** [WalOp] carries only the *semantic* fields for one
 /// operation. The `lsn` + `txnId` assigned at commit time live on the
-/// [SequencedWalOp] envelope — plan §2.1's sequencing note: *"ops are
+/// [SequencedWalOp] envelope's sequencing note: *"ops are
 /// constructed as an unsequenced form and sealed into WalOp (with
 /// lsn/txnId) at commit time."* This split lets transaction code build
 /// ops without knowing the LSN yet, and keeps the subclasses immutable
@@ -27,7 +27,7 @@ final class BeginTxn extends WalOp {
 
 /// Marks the end of a transaction's op group. [commitLsn] is the LSN
 /// at which the txn becomes durable; recovery applies a `txnId`'s ops
-/// only when it has a matching [CommitTxn] (plan §6.5).
+/// only when it has a matching [CommitTxn].
 final class CommitTxn extends WalOp {
   final int commitLsn;
   const CommitTxn(this.commitLsn);
@@ -48,7 +48,7 @@ final class AddNode extends WalOp {
 }
 
 /// Removes a node. Cascade-deletes incident edges within the same
-/// transaction (plan §6.4).
+/// transaction.
 final class DelNode extends WalOp {
   final Vid vid;
   const DelNode(this.vid);
@@ -72,9 +72,7 @@ final class SetNodeProp extends WalOp {
   final int keyId;
   final PropValue value;
 
-  /// Optional — carried only when the caller opts in (plan §6.4:
-  /// `prevValue` opt-in, off by default; on for richer audit trails
-  /// or simpler sync conflict detection).
+  /// Optional — carried only when the caller opts in.
   final PropValue? prevValue;
 
   const SetNodeProp({
@@ -137,12 +135,12 @@ final class DelEdgeProp extends WalOp {
   const DelEdgeProp({required this.eid, required this.keyId});
 }
 
-/// Constraint kind tag carried by [DeclareConstraint] (plan §4 / §14
-/// Phase 6C). v1 ships two kinds; future kinds (FK-like edge type,
-/// composite uniques, range constraints) extend the enum.
+/// Constraint kind tag carried by [DeclareConstraint]. v1 ships two
+/// kinds; future kinds (FK-like edge type, composite uniques, range
+/// constraints) extend the enum.
 enum ConstraintKind { unique, existence }
 
-/// Declares a constraint (plan §4 / §14 Phase 6C). v1 carries the
+/// Declares a constraint. v1 carries the
 /// full spec — name + label + key + kind — so recovery rebuilds the
 /// catalog without an out-of-band channel.
 final class DeclareConstraint extends WalOp {
@@ -166,7 +164,7 @@ final class DropConstraint extends WalOp {
 
 /// Interns a string id for a label / edge type / property key. Replayed
 /// during recovery so the local interner agrees with the WAL writer's
-/// id assignments (plan §3.5, §6.4).
+/// id assignments.
 final class InternString extends WalOp {
   final int intId;
   final String value;

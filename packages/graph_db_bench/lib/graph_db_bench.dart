@@ -1,6 +1,6 @@
 /// Dev-only benchmark harness for `graph_db_core` — R-MAT fixtures,
 /// hub-seed traversal selection, latency percentiles, JIT GC-event
-/// signal, and the Phase-1 read workloads from plan §15.
+/// signal, and the read workloads.
 library;
 
 export 'src/gc_signal.dart';

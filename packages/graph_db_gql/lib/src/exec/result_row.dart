@@ -1,4 +1,4 @@
-/// One row of query output (plan §8 / §14 Phase 3B).
+/// One row of query output.
 ///
 /// Bindings keyed by alias — Vids and Eids during the operator chain,
 /// projected values after [Project]. `Map<String, Object?>` keeps the

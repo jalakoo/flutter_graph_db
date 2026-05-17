@@ -1,6 +1,5 @@
 /// Push-only sync engine — consumes the WAL `WalOp` stream and
-/// ships transactions to configured `RemoteGraphClient`s (plan §10 /
-/// §14 Phase 7).
+/// ships transactions to configured `RemoteGraphClient`s.
 library;
 
 export 'src/sync_engine.dart' show SyncEngine, SyncRunReport;

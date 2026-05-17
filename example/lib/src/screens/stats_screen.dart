@@ -73,7 +73,7 @@ class StatsScreen extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
             child: Text(
-              'Reads use the primitive range API (plan §5) — '
+              'Reads use the primitive range API — '
               'allocation-free. Stats here scan the whole '
               '${db.nodeCount}-node graph in <1ms on desktop / iPhone.',
               style: theme.textTheme.bodySmall?.copyWith(

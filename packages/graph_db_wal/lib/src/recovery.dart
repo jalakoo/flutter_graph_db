@@ -1,15 +1,14 @@
-/// WAL recovery (plan §6.5 / §14 Phase 2C).
+/// WAL recovery.
 ///
 /// Reads a [WalStore], filters to only those `txnId`s that have a
 /// matching [CommitTxn], and replays the surviving ops through the
 /// applicator in `recovery: true` mode.
 ///
 /// **Two-pass.** We buffer the full stream and partition by `txnId`
-/// before replaying — Phase 2C is sized for ≤ 100k-edge fixtures and
-/// in-memory partitioning is the simplest correct shape. Phase 2D
-/// adds rotated segments + segment-aligned truncate; a one-pass
-/// streaming scan with bounded lookahead is the natural Phase 2D / 2E
-/// refinement.
+/// before replaying — sized for ≤ 100k-edge fixtures, where in-memory
+/// partitioning is the simplest correct shape. Rotated segments +
+/// segment-aligned truncate compose on top; a one-pass streaming scan
+/// with bounded lookahead is the natural next refinement.
 library;
 
 import 'dart:typed_data';
@@ -31,7 +30,7 @@ import 'wal_writer.dart';
 /// **committed** transaction.
 ///
 /// Returns a fresh, fully-applied state. Uncommitted txns (no matching
-/// [CommitTxn]) are silently dropped per plan §6.5.
+/// [CommitTxn]) are silently dropped
 ///
 /// `vidSpace` / `eidSpace` size the initial property-store
 /// allocations; the applicator's `_ensureNodeCapacity` /
@@ -98,9 +97,9 @@ Future<void> recoverInto(
 
 /// Convenience — recovers + wires a [WalWriter] sink, returning a
 /// ready-to-use [GraphDb]. The single entry-point most callers want
-/// for WAL-backed durability (plan §14 Phase 2C).
+/// for WAL-backed durability.
 ///
-/// [snapshot] (plan §14 Phase 6D) — optional snapshot bytes to load
+/// [snapshot] — optional snapshot bytes to load
 /// **before** WAL replay. When provided, the state is reconstructed
 /// from the snapshot and only WAL ops past the snapshot's LSN are
 /// replayed. The snapshot's `nextLsn` field tells recovery where to
@@ -123,13 +122,13 @@ Future<GraphDb> openWalBackedGraphDb({
   return GraphDb.fromState(state, sink: writer);
 }
 
-/// Truncates the WAL up to its current length (plan §14 Phase 6E).
+/// Truncates the WAL up to its current length.
 /// Call **after** persisting a snapshot of the same state — the
 /// snapshot owns the recovery contract for everything the truncate
 /// just dropped.
 ///
 /// Returns the byte offset retained (segment-aligned; may be less
-/// than requested per Phase 2D's truncate semantics).
+/// than requested per the store's truncate semantics).
 Future<int> compactToCurrentTip({required WalStore store}) async {
   return store.truncate(upToOffset: store.length);
 }

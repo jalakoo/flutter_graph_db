@@ -1,6 +1,6 @@
-/// Snapshot isolation primitives (plan §14 Phase 6A / 6B).
+/// Snapshot isolation primitives.
 ///
-/// **v1 scope:** the engine is single-writer (plan §2.3), so reads
+/// **v1 scope:** the engine is single-writer, so reads
 /// already observe a consistent state between commits — reading
 /// after `currentLsn == X` is by definition "all committed ops up to
 /// X". The [LsnPin] handle records that observation point so a
@@ -10,14 +10,14 @@
 /// **Full MVCC enforcement** — keeping prior CSR versions alive
 /// until every pin holding that LSN releases — is documented as the
 /// next layer above v1. With the single-writer model + the
-/// copy-first merge (Phase 2E), the practical gap is small:
+/// copy-first merge, the practical gap is small:
 /// readers between merges see a stable CSR; readers across a merge
 /// see the post-merge CSR (their pin is *advisory* about what the
 /// caller should re-fetch). The pin's `release()` is a hook that
 /// future MVCC can latch on to.
 library;
 
-/// Read isolation level (plan §14 Phase 6A).
+/// Read isolation level.
 enum IsolationLevel {
   /// Default — reads see the latest committed state. Concurrent
   /// writes may shift the CSR shape mid-read (in practice this
@@ -27,10 +27,10 @@ enum IsolationLevel {
 
   /// Reader pins the engine's `currentLsn` via [LsnPin]. v1 surfaces
   /// the pin as an observability marker — the engine doesn't yet
-  /// hold a prior CSR alive on the reader's behalf (that's the
-  /// Phase 6B+ MVCC layer). For single-writer workloads where
-  /// reads + writes are interleaved on the same isolate, this is
-  /// equivalent to readCommitted.
+  /// hold a prior CSR alive on the reader's behalf (that's a future
+  /// MVCC layer). For single-writer workloads where reads + writes are
+  /// interleaved on the same isolate, this is equivalent to
+  /// readCommitted.
   snapshot,
 }
 

@@ -1,5 +1,5 @@
 /// Constraint catalog — owns registered [ConstraintSpec]s + the
-/// mutation enforcement loop (plan §4 / §14 Phase 6C).
+/// mutation enforcement loop.
 ///
 /// The catalog is a thin wrapper around a `Map<String, ConstraintSpec>`
 /// — naming + lookup + iteration. Enforcement methods are pure
@@ -25,8 +25,7 @@ class ConstraintCatalog {
     _byName[spec.name] = spec;
   }
 
-  /// Removes [name]. No-op if absent (matches the §6.4
-  /// `DropConstraint` semantics — idempotent drop).
+  /// Removes [name]. No-op if absent (matches the /// `DropConstraint` semantics — idempotent drop).
   void drop(String name) => _byName.remove(name);
 
   ConstraintSpec? get(String name) => _byName[name];
@@ -78,7 +77,7 @@ class ConstraintCatalog {
   }
 
   /// Returns true if any [UniqueConstraint] covers `(labelId,
-  /// keyId)`. The unique-index enforcement (Phase 5) already
+  /// keyId)`. The unique-index enforcement already
   /// covers correctness for the SET path; this helper lets the
   /// catalog wire matching constraints to underlying unique
   /// indexes on `declareConstraint`.

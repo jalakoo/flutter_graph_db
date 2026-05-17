@@ -1,5 +1,5 @@
 /// Web-only entry point for the IndexedDB-backed `WalStore`
-/// (plan §11 / §14 Phase 8).
+///.
 ///
 /// Consumers opt in:
 /// ```dart

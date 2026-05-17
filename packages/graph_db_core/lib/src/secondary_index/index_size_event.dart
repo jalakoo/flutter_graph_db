@@ -1,16 +1,15 @@
-/// Secondary-index size-budget event (plan §3.3).
+/// Secondary-index size-budget event.
 ///
 /// The soft size budget is a one-shot signal fired at `createIndex()`
 /// when the new index's memory footprint exceeds a fraction of the
 /// CSR's topology footprint. Default threshold is 25 % (`warn`); the
 /// enum reserves higher tiers for forward-compatible escalation
-/// **without changing the callback signature** — see §3.3 in the
-/// master plan.
+/// **without changing the callback signature**.
 library;
 
 import 'index_spec.dart';
 
-/// Index-size warning tier (plan §3.3).
+/// Index-size warning tier.
 ///
 /// v1 fires only [warn] (≥ 25 % of CSR). Higher tiers are reserved
 /// so that future versions can fire `severe` / `critical` through the
@@ -26,7 +25,7 @@ enum IndexSizeSeverity {
   critical,
 }
 
-/// Event payload passed to `GraphDb.onIndexSizeEvent` (plan §3.3).
+/// Event payload passed to `GraphDb.onIndexSizeEvent`.
 ///
 /// One per `createIndex()` call whose index exceeds the threshold.
 /// Library default is silent — the host application opts in by wiring
@@ -68,6 +67,6 @@ class IndexSizeEvent {
 typedef IndexSizeListener = void Function(IndexSizeEvent event);
 
 /// v1 threshold for [IndexSizeSeverity.warn] — 25 % of CSR size per
-/// plan §3.3. Higher tiers (`severe` / `critical`) are pre-reserved
+/// Higher tiers (`severe` / `critical`) are pre-reserved
 /// in the enum but **not fired in v1**.
 const double kIndexSizeWarnThreshold = 0.25;

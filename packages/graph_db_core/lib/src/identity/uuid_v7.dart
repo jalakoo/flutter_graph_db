@@ -3,12 +3,12 @@ import 'package:uuid/uuid.dart';
 const _uuid = Uuid();
 
 /// Generates a fresh time-ordered UUIDv7 — the conventional
-/// `logicalId` for nodes and edges (plan §6.3, §7.4).
+/// `logicalId` for nodes and edges.
 ///
 /// **Across-ms ordering is strict.** The leading 48 bits are
 /// big-endian Unix-ms time, so a UUIDv7 produced at a later millisecond
-/// always sorts after one produced earlier. That is the property the
-/// plan relies on (sortable, time-ordered).
+/// always sorts after one produced earlier — the property callers rely
+/// on (sortable, time-ordered).
 ///
 /// **Within-ms ordering is implementation-defined.** `package:uuid`'s
 /// v7 fills the sub-ms bits with random data, so two ids generated in

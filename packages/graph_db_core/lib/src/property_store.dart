@@ -3,17 +3,18 @@ import 'dart:typed_data';
 import 'exceptions.dart';
 import 'prop_value.dart';
 
-/// What kind of value a property column holds (plan §3.2).
+/// What kind of value a property column holds.
 ///
 /// The columnar property store stores scalar types only. `PropList` and
-/// `PropMap` (boundary types in §5) are not stored in columns in v1.
+/// `PropMap` (boundary types in the public API) are not stored in
+/// columns in v1.
 ///
 /// `string` is the raw-string variant for unbounded-cardinality string
-/// properties (plan §3.5). `stringId` is reserved for the future
+/// properties. `stringId` is reserved for the future
 /// dictionary-encoded low-cardinality variant — not yet exercised.
 enum ColumnType { int_, double_, bool_, string, stringId }
 
-/// One per-key column (plan §3.2):
+/// One per-key column:
 ///
 /// - `values`         : typed array, compact, length = setCount
 /// - `vidToSlot`      : per-vid index into `values`; sentinel `_absent`
@@ -31,7 +32,7 @@ class _Column {
   ///
   /// **Why `Float64List` for `int`?** Web (`dart2js` / `dart2wasm`)
   /// has no `Int64List` — same constraint that drove `Uint32List` for
-  /// CSR topology (§3.1). `Float64List` stores any integer up to
+  /// CSR topology. `Float64List` stores any integer up to
   /// 2^53 exactly (IEEE 754 mantissa width); realistic node / edge
   /// counts, ages, timestamps in seconds all fit comfortably. Values
   /// that exceed 2^53 silently lose precision — flag the column type
@@ -133,9 +134,9 @@ class _Column {
   }
 }
 
-/// Per-key columnar property store (plan §3.2, Option A).
+/// Per-key columnar property store.
 ///
-/// Storage is **raw typed columns** — `PropValue` (plan §5) is never on
+/// Storage is **raw typed columns** — `PropValue` is never on
 /// the hot read path. Each key has its column type fixed at first write
 /// (`type-locked per key`); a later write of an incompatible type raises
 /// [ConstraintViolation]. To intentionally change a key's type, call
@@ -146,8 +147,7 @@ class _Column {
 class PropertyStore {
   /// Upper bound on `vid` (or `eid`) values this store handles. Grown
   /// via [growVidSpace] when the mutation path allocates a vid past
-  /// the current space (plan §2 — overlay holds the new node, but its
-  /// property slots live here).
+  /// the current space.
   int vidSpace;
 
   final Map<int, _Column> _columns = {};
@@ -187,8 +187,8 @@ class PropertyStore {
   }
 
   /// Clears all values for [keyId] and releases the column's type lock.
-  /// The next write re-locks the column at the new type. Plan §3.2 /
-  /// §5 documented escape hatch for intentional type changes.
+  /// The next write re-locks the column at the new type. Documented
+  /// escape hatch for intentional type changes.
   void dropColumn(int keyId) {
     _columns.remove(keyId);
   }
@@ -258,7 +258,7 @@ class PropertyStore {
 
   /// Tombstones [vid] in every declared column — called by
   /// `MutableGraphState.applyDelNode` so secondary-index rebuilds
-  /// don't pick up properties of a deleted node (plan §14 Phase 5).
+  /// don't pick up properties of a deleted node.
   void removeAllForVid(int vid) {
     for (final col in _columns.values) {
       col.tombstone(vid);
@@ -341,7 +341,7 @@ class PropertyStore {
 
   // -------------------------------------------------------- bulk scans
   //
-  // Used by the secondary-index builder (plan §3.3). Each scan visits
+  // Used by the secondary-index builder. Each scan visits
   // every vid where the column is set AND **not** explicit-null. v1
   // indexes do not include a NULL bucket; standard SQL-ish convention.
   // Allocation-free — typed value handed straight to [visit].

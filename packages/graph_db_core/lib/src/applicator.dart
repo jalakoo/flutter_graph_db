@@ -3,7 +3,7 @@ import 'mutable_graph_state.dart';
 import 'string_interner.dart';
 import 'wal_op.dart';
 
-/// The **single** code path that mutates in-memory state (plan §2.1).
+/// The **single** code path that mutates in-memory state.
 ///
 /// Every write path — live transactions, recovery, snapshot load, bulk
 /// import, sync replay — produces a [SequencedWalOp] stream and feeds
@@ -12,15 +12,11 @@ import 'wal_op.dart';
 ///
 /// [recovery] is `true` during WAL replay and bulk import: `AddEdge`
 /// then writes the CSR directly instead of routing through the delta
-/// overlay (which would otherwise trip a merge mid-replay). Phase 0
-/// has no overlay yet, so the flag is plumbed but unused.
+/// overlay (which would otherwise trip a merge mid-replay).
 ///
-/// **Phase 0 — skeleton.** The switch is exhaustive (no `default:`
-/// clause; the compiler fails on a new [WalOp] subclass), but most
-/// arms throw [UnimplementedError]. Phase 2 wires the mutation methods
-/// on [MutableGraphState] and replaces each `throw` with the real call.
-/// The [BeginTxn] / [CommitTxn] / [InternString] arms are the three
-/// already-implementable ops in Phase 0.
+/// The switch is exhaustive (no `default:` clause; the compiler fails
+/// on a new [WalOp] subclass) so adding a new [WalOp] subclass is a
+/// compile-time prompt to wire up its apply path.
 void apply(
   MutableGraphState state,
   SequencedWalOp seq, {
@@ -29,8 +25,9 @@ void apply(
   final op = seq.op;
   switch (op) {
     case BeginTxn():
-      // Phase 6 adds transaction-isolation / LSN-pinning machinery; in
-      // Phase 0-2's single-writer model the marker is informational.
+      // In the current single-writer model the marker is informational;
+      // future transaction-isolation / LSN-pinning machinery can hook
+      // here.
       return;
     case CommitTxn():
       return;

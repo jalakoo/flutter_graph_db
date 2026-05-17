@@ -1,4 +1,4 @@
-/// Worker-isolate merge coordinator (plan §2.3 / §14 Phase 2 polish).
+/// Worker-isolate merge coordinator.
 ///
 /// Owns one [PersistentWorker] for the lifetime of the engine. The
 /// main isolate **copies** the CSR + overlay into transferable
@@ -8,8 +8,7 @@
 ///
 /// On web (where `Isolate.spawn` throws), the coordinator's web
 /// fallback folds inline on the main isolate. This violates the
-/// `< 1 ms` stall acceptance target on web — a documented Phase 8
-/// concern.
+/// `< 1 ms` stall acceptance target on web — a known limitation.
 library;
 
 import 'dart:isolate';

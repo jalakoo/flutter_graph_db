@@ -1,4 +1,4 @@
-/// Engine-side WAL port (plan §2.2 / §6).
+/// Engine-side WAL port.
 ///
 /// `graph_db_core` does not depend on `graph_db_wal`. Instead, the
 /// engine writes through this abstract sink. `graph_db_wal.WalWriter`
@@ -11,12 +11,11 @@ import 'wal_op.dart';
 
 /// The single port the commit pipeline writes through.
 ///
-/// Phase 2C: every [SequencedWalOp] is fed individually with a
+/// every [SequencedWalOp] is fed individually with a
 /// [Durability] hint; the sink is expected to honour `fsync`
-/// synchronously. Phase 2D introduces group-commit batching which may
-/// coalesce multiple [append] calls behind a single fsync — the
-/// signature stays the same; the *policy* changes at the durability
-/// layer.
+/// synchronously. Group-commit batching may coalesce multiple [append]
+/// calls behind a single fsync — the signature stays the same; the
+/// *policy* changes at the durability layer.
 abstract class WalSink {
   /// Encode + append one sequenced op. Returns once the bytes are
   /// at or past the [durability] level requested.
@@ -25,7 +24,7 @@ abstract class WalSink {
   /// Encode + append a sequence of ops as a single batch — typically
   /// `BeginTxn` → user ops → `CommitTxn` from one transaction. The
   /// concrete implementation may coalesce the per-op fsync into a
-  /// single durability ack (group-commit, plan §6.7). Default impl
+  /// single durability ack (group-commit,). Default impl
   /// loops [append]; concrete writers should override for efficiency.
   Future<void> appendBatch(
     List<SequencedWalOp> ops, {
@@ -44,7 +43,7 @@ abstract class WalSink {
 
   /// Forces any in-flight bytes to durable storage. Called by
   /// `GraphDb.close()` and by the group-commit timer when batches
-  /// close out (plan §6.7).
+  /// close out.
   Future<void> sync();
 
   /// Releases the sink. After this, [append] / [sync] throw.

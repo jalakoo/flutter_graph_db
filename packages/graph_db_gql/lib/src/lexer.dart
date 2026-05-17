@@ -1,10 +1,10 @@
-/// Cypher lexer (plan §8 / §14 Phase 3A).
+/// Cypher lexer.
 ///
 /// Hand-rolled — no regex, no codegen. Tokenizes the v1 read subset:
 /// keywords, identifiers, numeric / string / bool / null literals,
 /// arithmetic + comparison operators, and the punctuation needed for
 /// patterns and projections. Line + column on every token so the
-/// parser can produce §8-spec error messages.
+/// parser can produce spec-shaped error messages.
 library;
 
 enum TokenKind {

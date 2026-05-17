@@ -5,14 +5,14 @@ import 'package:graph_db_core/graph_db_core.dart';
 import 'codec/wal_codec.dart';
 import 'wal_store.dart';
 
-/// Frames + encodes [SequencedWalOp]s per the §6.1 schema, appends to
+/// Frames + encodes [SequencedWalOp]s per the schema, appends to
 /// the underlying [WalStore], and coalesces fsyncs across transactions
-/// via a **group-commit** window (plan §6.7).
+/// via a **group-commit** window.
 ///
-/// Implements [WalSink] (plan §2.2) so it plugs directly into
+/// Implements [WalSink] so it plugs directly into
 /// `GraphDb.fromState(..., sink: walWriter)`.
 ///
-/// Group-commit policy (Phase 2D):
+/// Group-commit policy:
 /// - [Durability.fsync] — synchronous fsync at the end of the call.
 ///   Lowest latency variance, highest fsync count.
 /// - [Durability.group] (default) — append + register a completer,
@@ -28,7 +28,7 @@ class WalWriter implements WalSink {
   final WalCodec _codec;
 
   /// How long to wait before flushing the next group-commit batch.
-  /// Default 1 ms per plan §6.7. Tests can pass [Duration.zero] for
+  /// Default 1 ms Tests can pass [Duration.zero] for
   /// "next microtask" semantics.
   final Duration groupWindow;
 

@@ -1,4 +1,4 @@
-/// Write-side acceptance benches for plan §14 Phase 2 / §15.
+/// Write-side acceptance benches.
 ///
 /// Three workloads:
 /// 1. **100k bulk insert** — wall time of `GraphDb.bulkAddEdges`.
@@ -8,7 +8,7 @@
 /// 3. **Merge stall** — p50 / p99 of the synchronous overlay-merge
 ///    fold on the main isolate. Target: < 1 ms (achievable on the
 ///    100 k bench; larger graphs need the worker-isolate hand-off
-///    documented as a Phase 2 polish follow-up).
+///    as a follow-up).
 library;
 
 import 'dart:typed_data';
@@ -29,7 +29,7 @@ class WriteBenchReport {
 
   String format({String envLabel = 'desktop'}) {
     final sb = StringBuffer();
-    sb.writeln('=== graph_db_bench — Phase 2 write workloads ===');
+    sb.writeln('=== graph_db_bench — write workloads ===');
     sb.writeln('env: $envLabel');
     sb.writeln('');
     sb.writeln('1) bulkAddEdges (100k edges, fresh graph):');
@@ -126,7 +126,7 @@ Future<WriteBenchReport> runWriteWorkloads({
   // synchronous fold. Each iteration re-builds the overlay so we
   // measure the fold cost, not the overlay-build cost.
   // [coord] (optional) — if provided, run the merge through the
-  // worker isolate (plan §2.3 / Phase 2 polish). Main-isolate stall
+  // worker isolate. Main-isolate stall
   // is then bounded by the copy + install cost; the fold runs
   // off-main.
   final mergeLatencies = Float64List(mergeSamples);

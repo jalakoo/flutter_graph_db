@@ -1,9 +1,8 @@
-/// Cross-isolate hand-off for the overlay merge (plan §2.3 / §14
-/// Phase 2 polish — Spike B port).
+/// Cross-isolate hand-off for the overlay merge.
 ///
 /// [TransferableTypedData] **moves** the wrapped buffers: the sender
 /// loses access on send. To keep the live CSR readable on the main
-/// isolate, every wrap **copies** first. That's the SPIKE_B
+/// isolate, every wrap **copies** first. That's the
 /// "copy-first" design — measured necessary (transfer is destructive)
 /// and sufficient (round-trip lossless on native VMs).
 ///

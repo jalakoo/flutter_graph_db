@@ -1,12 +1,11 @@
 /// OpenCypher subset parser / planner / executor for `graph_db_core`
-/// (plan §8 / §14 Phase 3).
+///.
 ///
 /// Imported solely for its extension on `GraphDb` — `db.executeQuery(...)`
 /// becomes available wherever this library is in scope.
 library;
 
-// Exports land as sub-phases ship — see `4_PLAN.md` Phase 3 sub-table.
-// 3A (lexer + parser + AST): done. 3B (planner + executor): done.
+// Public surface: lexer + parser + AST + planner + executor.
 export 'src/ast.dart';
 export 'src/engine_extension.dart' show GqlExecuteQuery;
 export 'src/exec/executor.dart' show GqlExecutor;

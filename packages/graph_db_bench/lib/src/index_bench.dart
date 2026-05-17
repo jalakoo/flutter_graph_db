@@ -1,14 +1,14 @@
-/// Phase 5E acceptance bench (plan §14 / §15).
+/// Indexed-update acceptance bench.
 ///
 /// Builds an indexed property over a [nodeCount]-node graph, then
 /// measures the wall-clock latency of [iterations] property updates
-/// against that indexed column. Target per §14: `p99 ≤ 100 µs` at
+/// against that indexed column. Target: `p99 ≤ 100 µs` at
 /// 1 M nodes.
 ///
-/// **Honest expectation:** the v1 strategy is drop-and-rebuild
-/// (Phase 5A) — O(n) per mutation. At 1 M nodes that's milliseconds
+/// **Honest expectation:** the baseline strategy is drop-and-rebuild
+/// — O(n) per mutation. At 1 M nodes that's milliseconds
 /// per update, not microseconds. The bench is wired to make the gap
-/// visible and motivate the Phase 5B+ worker-isolate offload + the
+/// visible and motivate the worker-isolate offload + the
 /// incremental insert/delete refinement needed to actually hit the
 /// target.
 library;
@@ -37,7 +37,7 @@ class IndexBenchReport {
 
   String format({String envLabel = 'desktop'}) {
     final sb = StringBuffer();
-    sb.writeln('=== graph_db_bench — Phase 5 indexed-update workloads ===');
+    sb.writeln('=== graph_db_bench — indexed-update workloads ===');
     sb.writeln('env: $envLabel');
     sb.writeln('fixture: $nodeCount nodes, $iterations updates per shape');
     sb.writeln('');
@@ -45,7 +45,7 @@ class IndexBenchReport {
     sb.writeln('   p50: ${syncUpdateStats.p50.toStringAsFixed(1)} us');
     sb.writeln('   p99: ${syncUpdateStats.p99.toStringAsFixed(1)} us');
     sb.writeln('   target: p99 <= 100 us  '
-        '${syncUpdateStats.p99 <= 100 ? 'PASS' : 'FAIL (expected — drop-and-rebuild is O(n); 5B+ closes the gap)'}');
+        '${syncUpdateStats.p99 <= 100 ? 'PASS' : 'FAIL (expected — drop-and-rebuild is O(n); incremental indexes close the gap)'}');
     sb.writeln('');
     sb.writeln('2) Deferred index — mutation queues only, flush at the end:');
     sb.writeln('   per-update p50: '

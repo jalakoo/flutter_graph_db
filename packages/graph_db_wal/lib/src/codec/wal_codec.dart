@@ -6,28 +6,28 @@ import 'package:xxh3/xxh3.dart';
 
 /// Codec for one framed WAL entry.
 ///
-/// **Frame layout (plan §6.1):**
+/// **Frame layout:**
 ///
 /// ```text
 /// [ varint: body length ][ body bytes (CBOR) ][ xxHash64(body), 8 bytes BE ]
 /// ```
 ///
-/// **Encoding** uses `package:cbor`'s simple codec everywhere. The
-/// §13 dep-audit verdict — hand-roll `AddNode` / `AddEdge` /
-/// `SetNodeProp` because `package:cbor` is 5× the hand-rolled baseline
-/// on iOS AOT — applies to a Phase 2 optimisation; the schema laid
-/// down here (text-keyed maps with `op` naming the kind) is the same
-/// shape the audit's `handRollAddEdgeCbor` produced, so the optimised
-/// encoders will drop in without changing the on-disk format.
+/// **Encoding** uses `package:cbor`'s simple codec everywhere. A
+/// dep-audit found that hand-rolling `AddNode` / `AddEdge` /
+/// `SetNodeProp` is ~5× faster than `package:cbor` on iOS AOT — that
+/// optimisation is a follow-up, but the schema laid down here
+/// (text-keyed maps with `op` naming the kind) matches what
+/// `handRollAddEdgeCbor` produces, so the optimised encoders can
+/// drop in without changing the on-disk format.
 ///
 /// **Torn-write detection.** The decoder validates the xxHash64
 /// checksum; mismatch terminates the scan and discards everything past
-/// the first bad entry (§6.5). Truncation at any point inside a frame
+/// the first bad entry. Truncation at any point inside a frame
 /// is treated the same.
 ///
 /// **Web note.** Dart ints on web are 53-bit; the 64-bit checksum write
 /// uses `>>>` so it's correct on native, but reading back on web would
-/// lose the top 11 bits. The web `WalStore` adapter (Phase 8) will need
+/// lose the top 11 bits. The web `WalStore` adapter will need
 /// a 53-bit-safe checksum representation, or the framing format will
 /// switch to two 32-bit words.
 class WalCodec {
@@ -358,7 +358,7 @@ int readUint64Be(Uint8List buf, int offset) {
 
 /// Stateful decoder that consumes byte chunks from a [WalStore] and
 /// yields [SequencedWalOp]s. Halts at the first bad checksum or
-/// truncated frame (§6.5 — bad checksum terminates the recovery scan).
+/// truncated frame.
 class WalDecoder {
   final WalCodec _codec;
   final List<int> _buf = [];

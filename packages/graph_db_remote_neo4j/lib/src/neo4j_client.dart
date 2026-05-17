@@ -17,7 +17,7 @@ class Neo4jClientConfig {
   final bool useTls;
   final String? username;
   final String? password;
-  /// Future-bearing token provider (plan §9.4). Takes precedence over
+  /// Future-bearing token provider. Takes precedence over
   /// [password] if both are set.
   final TokenProvider? tokenProvider;
   final String userAgent;
@@ -214,7 +214,7 @@ class Neo4jClient implements RemoteGraphClient {
 
   @override
   Stream<GraphElement> bulkExport(SubgraphSpec spec) async* {
-    // Minimal — full bulk-export is a Phase 4 follow-up. Emit nodes
+    // Minimal — full bulk-export is a follow-up. Emit nodes
     // first, then edges, both filtered by spec.
     final labelFilter = spec.nodeLabels == null
         ? ''
@@ -334,8 +334,8 @@ class Neo4jClient implements RemoteGraphClient {
           out[e.key] = value;
         case PropList():
         case PropMap():
-          // Nested types deferred (matches engine §3.2 — column store
-          // doesn't carry these either).
+          // Nested types deferred (the engine's column store doesn't
+          // carry these either).
           break;
       }
     }

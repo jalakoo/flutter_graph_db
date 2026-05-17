@@ -30,7 +30,7 @@ class RmatEdges {
 }
 
 /// Generates an R-MAT graph. [nodeCount] must be a power of two. Defaults
-/// match the SPIKE_A fixture: 0.57 / 0.19 / 0.19 / 0.05 quadrant
+/// match the fixture: 0.57 / 0.19 / 0.19 / 0.05 quadrant
 /// probabilities — produces a skewed degree distribution that's a
 /// realistic stress for the read primitives.
 RmatEdges rmat({
@@ -81,8 +81,7 @@ RmatEdges rmat({
   }
 
   // Single edge type for the synthetic graph; the bench doesn't measure
-  // type-filtered traversal yet (plan §3.1 sorts edges by type but
-  // type-filtered range scan is a Phase 1.1 feature).
+  // type-filtered traversal yet.
   final edgeTypes = Uint32List(edgeCount);
 
   return RmatEdges(

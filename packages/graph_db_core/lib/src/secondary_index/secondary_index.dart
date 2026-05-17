@@ -1,7 +1,7 @@
 /// Secondary-index public interface + per-type sorted-array impls
-/// (plan §3.3).
+///.
 ///
-/// The shape mirrors the §5 primitive read API: callers get
+/// The shape mirrors the primitive read API: callers get
 /// `lowerBound` / `upperBound` integer indices into [sortedVids] and
 /// then index that array directly. Allocation-free on the hot path.
 library;
@@ -20,7 +20,7 @@ abstract class SecondaryIndex {
   IndexSpec get spec;
 
   /// Approximate memory footprint, in bytes. Used by the registry to
-  /// compute the size-budget ratio (plan §3.3).
+  /// compute the size-budget ratio.
   int get sizeBytes;
 
   /// Number of (value, vid) entries in the index — excludes vids that
@@ -37,7 +37,7 @@ abstract class SecondaryIndex {
 
   /// True when the spec's [EqualityRange.unique] flag is set — the
   /// registry consults this to enforce uniqueness on every
-  /// mutation that touches the indexed property (plan §14 Phase 5).
+  /// mutation that touches the indexed property.
   bool get isUnique;
 }
 
@@ -49,7 +49,7 @@ abstract class SecondaryIndex {
 // Equality range is `[lowerBound(q), upperBound(q))`.
 
 // Note: `int_` columns are stored in `Float64List` (web has no
-// `Int64List` — same compat reason as the §3.1 `Uint32List` re-spec).
+// `Int64List` — same compat reason as the `Uint32List` re-spec).
 // Comparison between a `double` cell and an `int` query is exact for
 // values < 2^53, which covers every realistic integer property.
 int _lbInt(Float64List vs, int n, int q) {
@@ -167,7 +167,7 @@ class IntEqualityRangeIndex implements SecondaryIndex {
 
   /// Sorted values, length == [length]. Index `i` pairs with
   /// [sortedVids] index `i`. Non-final: replaced lazily on the first
-  /// range query after an incremental mutation (plan §14 Phase 5).
+  /// range query after an incremental mutation.
   ///
   /// Stored as `Float64List` (web compat — see file-top note); each
   /// cell holds an integer ≤ 2^53. Read sites do `.toInt()` at the
@@ -339,7 +339,7 @@ class IntEqualityRangeIndex implements SecondaryIndex {
     return b == null ? null : Uint32List.fromList(b);
   }
 
-  // ----- Incremental mutations (plan §14 Phase 5) ---------------------------
+  // ----- Incremental mutations ---------------------------
 
   /// In-place insert of a `(vid, value)` pair. Requires
   /// `EqualityRange(incremental: true)` on the spec — throws

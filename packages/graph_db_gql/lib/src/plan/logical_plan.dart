@@ -1,4 +1,4 @@
-/// Logical plan IR (plan §8 / §14 Phase 3B).
+/// Logical plan IR.
 ///
 /// Sealed so future operators (`Sort`, `Limit`, `Aggregate`,
 /// `VarLengthExpand`, etc.) land as additional cases the executor
@@ -75,7 +75,7 @@ class Distinct extends LogicalPlan {
   const Distinct(this.source);
 }
 
-/// Aggregation operator (plan §8 / §14 Phase 3C). Groups incoming
+/// Aggregation operator. Groups incoming
 /// rows by [groupExprs] (parallel arrays — same column name + same
 /// expression) and accumulates [aggregates]. Emits one row per
 /// distinct group.
@@ -102,7 +102,7 @@ class Aggregate extends LogicalPlan {
 
 /// Full materialised sort by [keys] (mixed ASC / DESC). v1 doesn't
 /// special-case the top-k path — adding the heap when LIMIT is
-/// present is a Phase 3C polish.
+/// present is a polish follow-up.
 class Sort extends LogicalPlan {
   final LogicalPlan source;
   final List<SortKey> keys;
@@ -130,14 +130,13 @@ class Limit extends LogicalPlan {
   });
 }
 
-/// Variable-length expansion (plan §8 / §14 Phase 3D).
+/// Variable-length expansion.
 ///
 /// For each incoming row, walks edges of [direction] from
 /// [fromAlias]'s binding via BFS up to [maxHops] (unbounded when
 /// `null`); emits one row per reachable vid whose distance is at
 /// least [minHops]. The intermediate path edges are **not** bound —
-/// v1 does not project paths as values (plan §8 path-return-type is
-/// a future field).
+/// v1 does not project paths as values.
 class VarLengthExpand extends LogicalPlan {
   final LogicalPlan source;
   final String fromAlias;

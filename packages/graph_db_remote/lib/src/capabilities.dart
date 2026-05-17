@@ -1,4 +1,4 @@
-/// Adapter capability flags (plan §9.9).
+/// Adapter capability flags.
 ///
 /// Backend-specific behaviour flows through this surface — application
 /// code stays backend-agnostic but can branch on capability bits when

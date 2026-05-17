@@ -1,6 +1,6 @@
-/// Per-commit durability hint (plan §6.7).
+/// Per-commit durability hint.
 ///
-/// Surfaces through `runInTransaction(durability: …)` (§7.3) and is
+/// Surfaces through `runInTransaction(durability: …)` and is
 /// forwarded to the `WalStore` append path in `graph_db_wal`.
 enum Durability {
   /// Hundreds of txn/s. fsync after every commit — single-txn

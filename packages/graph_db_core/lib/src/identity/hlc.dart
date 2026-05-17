@@ -1,11 +1,10 @@
 import 'dart:math' as math;
 
-/// Hybrid Logical Clock value (plan §6.3, §10).
+/// Hybrid Logical Clock value.
 ///
 /// Two fields: wall-clock [ms] (Unix epoch ms) + a tie-breaking
 /// [counter]. **Represented as a record-shaped class — not packed into
-/// a single 64-bit int — so it survives the web 53-bit limit** (plan
-/// §6.3 explicitly calls this out).
+/// a single 64-bit int — so it survives the web 53-bit limit.**
 ///
 /// Ordering: `(ms, counter)` lexicographic. Two HLCs are equal iff
 /// both fields match.
@@ -40,7 +39,7 @@ class Hlc implements Comparable<Hlc> {
   String toString() => 'Hlc(ms: $ms, c: $counter)';
 }
 
-/// Mutable HLC clock per plan §6.3.
+/// Mutable HLC clock
 ///
 /// - [tick] for local events — bumps the clock past the wall-clock
 ///   reading or, if the wall clock has not advanced, bumps the

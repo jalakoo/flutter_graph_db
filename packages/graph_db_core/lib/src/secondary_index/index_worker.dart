@@ -1,13 +1,13 @@
-/// Worker-isolate index rebuild (plan §14 Phase 5B+).
+/// Worker-isolate index rebuild.
 ///
-/// Mirrors `merge/merge_coordinator.dart` (the SPIKE_B copy-first
+/// Mirrors `merge/merge_coordinator.dart` (the copy-first
 /// design): main isolate **copies** the column's (value, vid) pairs
 /// into fresh typed buffers, wraps them in [TransferableTypedData],
 /// sends to a worker; worker sorts + packs the result and returns;
 /// main installs. The live property store is never detached.
 ///
-/// **Phase 5B+ scope:** supports `int_` (`Float64List` value column —
-/// web compat per §3.1 / Phase 8) only. The same pattern extends trivially to `double_` /
+/// **Scope:** supports `int_` (`Float64List` value column — web
+/// compat) only. The same pattern extends trivially to `double_` /
 /// `stringId` / `bool` (uniform typed-list shape); the `string`
 /// column needs a different transport (strings travel as
 /// `List<String>` across isolates).

@@ -1,8 +1,8 @@
-/// Constraint catalog (plan §4 / §14 Phase 6C).
+/// Constraint catalog.
 ///
 /// Sealed hierarchy — every spec is one of [UniqueConstraint] or
 /// [ExistenceConstraint]. The catalog is replayed from the WAL via
-/// the `DeclareConstraint` / `DropConstraint` ops (plan §6.4) so a
+/// the `DeclareConstraint` / `DropConstraint` ops so a
 /// recovered engine starts with the same constraints active.
 ///
 /// **Single-property only in v1.** Composite (label, key1, key2)
@@ -31,8 +31,8 @@ sealed class ConstraintSpec {
 /// "No two distinct nodes carrying [labelId] may share the same
 /// value for [keyId]." Enforced at every `applyAddNode` /
 /// `applySetNodeProp` that touches the column — implemented in
-/// terms of the Phase 5 unique-index machinery so the check is
-/// O(log n) via the index's binary search.
+/// terms of the unique-index machinery so the check is O(log n) via
+/// the index's binary search.
 final class UniqueConstraint extends ConstraintSpec {
   const UniqueConstraint({
     required super.name,

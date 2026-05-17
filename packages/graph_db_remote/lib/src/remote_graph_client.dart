@@ -1,4 +1,4 @@
-/// The port adapters implement (plan §9.1 / §14 Phase 4A).
+/// The port adapters implement.
 ///
 /// Concrete adapters live in sibling packages
 /// (`graph_db_remote_neo4j`, `graph_db_remote_falkor`) so consumers
@@ -9,7 +9,7 @@
 /// The port is intentionally minimal — bulk import / export, query,
 /// transaction. Streaming reads (`executeQueryStream`), change
 /// subscription (`subscribeChanges`), and health probes are deferred
-/// past v1 (plan §9.1). `tokenProvider` covers v1 auth (plan §9.4).
+/// past v1. `tokenProvider` covers v1 auth.
 library;
 
 import 'capabilities.dart';
@@ -18,7 +18,7 @@ import 'result_types.dart';
 
 /// One-shot async function the adapter calls before every request
 /// (or once per connection — adapters set the contract). Returns the
-/// bearer token / password / API key to put on the wire. Plan §9.4
+/// bearer token / password / API key to put on the wire.
 /// — the primary auth mechanism in v1.
 typedef TokenProvider = Future<String> Function();
 

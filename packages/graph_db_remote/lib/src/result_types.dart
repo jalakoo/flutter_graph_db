@@ -1,4 +1,4 @@
-/// Remote result types (plan §9.7).
+/// Remote result types.
 ///
 /// The local engine (`graph_db_core`) and the remote adapters return
 /// distinct concrete types (`LocalNode` vs `RemoteNode`) that share
@@ -12,12 +12,12 @@ import 'package:graph_db_core/graph_db_core.dart';
 
 /// Common interface for any node — local or remote.
 abstract interface class GraphNode {
-  /// Stable across-backend identifier the engine uses for sync (plan
-  /// §6.3 — UUIDv7 by default).
+  /// Stable across-backend identifier the engine uses for sync —
+  /// UUIDv7 by default.
   String get logicalId;
 
-  /// Single-label storage v1 (plan §6.4). Multi-label promotion is
-  /// Phase 1.1; for now the boundary returns one label.
+  /// Single-label storage v1. Multi-label promotion is
+  /// a future; for now the boundary returns one label.
   String? get label;
 
   Map<String, PropValue> get properties;
@@ -68,7 +68,7 @@ class RemoteNode implements GraphNode {
 
   /// Backend-native id, if the backend exposes one (Neo4j's
   /// `node.elementId` / `id(n)` / FalkorDB's internal id). Used by
-  /// the ID translation cache (plan §9.8) to map local logicalIds to
+  /// the ID translation cache to map local logicalIds to
   /// backend ids without forcing the application to handle both.
   final String? remoteId;
 

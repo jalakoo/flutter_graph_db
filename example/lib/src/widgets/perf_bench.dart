@@ -1,4 +1,4 @@
-/// In-app perf bench (plan §14 Phase 8E). Runs a sequence of mutations
+/// In-app perf bench. Runs a sequence of mutations
 /// + reads against a *temporary* `GraphDb` (the demo graph is left
 /// untouched) and reports total / p50 / p99 / throughput so the user
 /// can capture numbers from a real browser / iOS / Android session
@@ -30,7 +30,7 @@ class _PerfBenchState extends State<PerfBench> {
   _BenchResult? _result;
   Object? _error;
 
-  static const _sizes = [100, 1000, 10000];
+  static const _sizes = [100, 1000, 10000, 100000];
 
   Future<void> _run() async {
     setState(() {
@@ -94,7 +94,7 @@ class _PerfBenchState extends State<PerfBench> {
                   value: _n,
                   items: [
                     for (final s in _sizes)
-                      DropdownMenuItem(value: s, child: Text('$s')),
+                      DropdownMenuItem(value: s, child: Text(_fmtThousands(s))),
                   ],
                   onChanged: _running
                       ? null
@@ -255,15 +255,19 @@ class _ResultsTableState extends State<_ResultsTable> {
     );
   }
 
-  static String _fmt(int n) {
-    final s = n.toString();
-    final buf = StringBuffer();
-    for (var i = 0; i < s.length; i++) {
-      if (i > 0 && (s.length - i) % 3 == 0) buf.write(',');
-      buf.write(s[i]);
-    }
-    return buf.toString();
+  static String _fmt(int n) => _fmtThousands(n);
+}
+
+/// Thousands-separated integer for display ("1,000,000"). Used in the
+/// N dropdown and the results table.
+String _fmtThousands(int n) {
+  final s = n.toString();
+  final buf = StringBuffer();
+  for (var i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 == 0) buf.write(',');
+    buf.write(s[i]);
   }
+  return buf.toString();
 }
 
 class _Stats {

@@ -1,10 +1,10 @@
-/// Sealed property value hierarchy (plan §5).
+/// Sealed property value hierarchy.
 ///
 /// **Boundary-only.** The storage core works in raw typed columns
-/// (§3.2). `PropValue` is constructed at the public API boundary — in
+///. `PropValue` is constructed at the public API boundary — in
 /// GQL `RETURN`, in the object-graph wrapper, and for `WalOp` encoding.
 /// Reads off the hot path never box; per-read boxing was measured at ~8×
-/// the raw accessor on device (Spike A).
+/// the raw accessor on device.
 sealed class PropValue {
   const PropValue();
 }
@@ -59,9 +59,9 @@ final class PropBool extends PropValue {
   String toString() => 'PropBool($value)';
 }
 
-/// Explicit null — distinct from "key not set" (plan §5). The property
+/// Explicit null — distinct from "key not set". The property
 /// store tracks the absence/explicit-null distinction via per-key
-/// presence + `isNull` bitmaps (§3.2), not by a sentinel in the typed
+/// presence + `isNull` bitmaps, not by a sentinel in the typed
 /// value array.
 final class PropNull extends PropValue {
   const PropNull();

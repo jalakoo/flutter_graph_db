@@ -5,7 +5,7 @@ import 'package:graph_db_core/graph_db_core.dart';
 
 import 'wal_store.dart';
 
-/// `dart:io` `RandomAccessFile`-backed [WalStore] adapter (plan §11).
+/// `dart:io` `RandomAccessFile`-backed [WalStore] adapter.
 /// The default on iOS / Android / desktop.
 ///
 /// **Single-file mode.** All bytes live in one file at the given path.
@@ -13,8 +13,8 @@ import 'wal_store.dart';
 /// into memory, overwrite from byte 0, truncate the file to the new
 /// length). This works for typical WAL sizes (<100 MB) but rewrites
 /// the whole file on each compact; the rotated 16 MB segment layout
-/// (plan §6.2) is the proper polish — O(1) truncate via segment-file
-/// delete. Tracked as a Phase 2 carry-forward.
+/// is the proper polish — O(1) truncate via segment-file delete —
+/// tracked as a carry-forward.
 class IoWalStore implements WalStore {
   final File _file;
   RandomAccessFile? _raf;
@@ -45,7 +45,8 @@ class IoWalStore implements WalStore {
     }
     // `group`, `periodic`, and `none` are routed through the engine's
     // group-commit / timer logic — that layer calls [sync] at the
-    // configured cadence. Phase 0 leaves the timer plumbing to Phase 2.
+    // configured cadence. The timer plumbing lives in the engine, not
+    // here.
   }
 
   @override
@@ -85,7 +86,7 @@ class IoWalStore implements WalStore {
     // Tail-rewrite: read [upToOffset..length) into memory, overwrite
     // from byte 0, truncate to the new length. The whole-file rewrite
     // cost is the trade-off for staying in single-file mode; the
-    // rotated-segment design (§6.2) gets to O(1) per compact.
+    // rotated-segment design gets to O(1) per compact.
     final tailLength = _length - upToOffset;
     final reader = await _file.open();
     Uint8List tail;

@@ -8,7 +8,7 @@ int blackhole = 0;
 /// Reference sink for heap objects — assigning a freshly boxed value here
 /// makes it *escape*, defeating the VM's escape analysis / scalar
 /// replacement (a box that is allocated and immediately discarded would
-/// otherwise read as zero allocation; this came up real in SPIKE_A).
+/// otherwise read as zero allocation; this came up real in).
 Object? escapeSink;
 
 class LatencyStats {

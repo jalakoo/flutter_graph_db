@@ -1,5 +1,5 @@
 /// Rule-based planner — `MatchStatement` → [LogicalPlan]
-/// (plan §8 / §14 Phase 3B).
+///.
 ///
 /// v1: single [PatternPart] only. Multi-pattern (comma-separated)
 /// requires a Cartesian / join operator scheduled for a later
@@ -41,7 +41,7 @@ class GqlPlanner {
     if (m.patterns.length != 1) {
       throw PlannerException(
         'multi-pattern MATCH (comma-separated) lands in a later '
-        'Phase 3 sub-phase',
+        'the future work sub-phase',
       );
     }
     final part = m.patterns.single;
@@ -71,7 +71,7 @@ class GqlPlanner {
         if (rel.alias != null) {
           throw PlannerException(
             'variable-length relationships cannot bind a single alias '
-            '(use Path return type once it lands — plan §8)',
+            '(use Path return type once it lands)',
           );
         }
         plan = VarLengthExpand(
@@ -298,8 +298,7 @@ class GqlPlanner {
   /// recognises.
   Expression _labelMatchPredicate(String alias, List<String> labels) {
     // v1 single-label — the first label is enforced; secondary labels
-    // accepted by the parser are ignored (plan §6.4: multi-label is
-    // Phase 1.1 refinement).
+    // accepted by the parser are ignored.
     final labelId = db.state.strings.labelIdOf(labels.first);
     if (labelId == null) {
       throw PlannerException(

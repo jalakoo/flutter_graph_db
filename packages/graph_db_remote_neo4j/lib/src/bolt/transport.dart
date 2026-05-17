@@ -19,7 +19,7 @@ abstract interface class BoltTransport {
 /// Production transport — wraps a `dart:io` `Socket`. Native targets
 /// only; web has no `Socket`, and Bolt doesn't currently support
 /// browser transports (Neo4j ships a separate `bolt+ws` WebSocket
-/// scheme that's a Phase 8 concern).
+/// scheme — out of scope here).
 class SocketBoltTransport implements BoltTransport {
   final Socket _socket;
   SocketBoltTransport(this._socket);

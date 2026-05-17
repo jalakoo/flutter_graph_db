@@ -98,17 +98,41 @@ flutter run -d <iphone> --release        # iPhone release build
 
 ## Tests
 
-Widget tests:
+### Widget tests (this app)
+
+Pure-Dart widget tests run on the host VM:
 
 ```sh
 flutter test
 ```
 
-On-device integration test (release-mode AOT — the verdict run):
+### On-device integration tests (this app)
+
+Release-mode AOT — the verdict run on real hardware. `flutter devices`
+lists attached targets and their IDs.
 
 ```sh
-flutter test integration_test/example_app_test.dart -d <iphone>
+flutter test integration_test/example_app_test.dart -d <iphone-id>     # iOS
+flutter test integration_test/example_app_test.dart -d <android-id>    # Android
+flutter test integration_test/example_app_test.dart -d macos           # macOS desktop
+flutter test integration_test/example_app_test.dart -d windows         # Windows desktop
+flutter test integration_test/example_app_test.dart -d linux           # Linux desktop
 ```
+
+### Browser-side adapter tests (different package)
+
+The `graph_db_wal` package's IndexedDB adapter has its own browser-side
+test suite that exercises real IndexedDB calls. These run only under
+`dart test -p chrome`; VM-side `dart test` correctly skips them.
+
+```sh
+cd ../packages/graph_db_wal
+dart test -p chrome test/indexeddb_wal_store_test.dart
+```
+
+Chrome must be installed locally. Add `-p firefox` to run against
+Firefox instead. CI lanes can wire this in by ensuring a browser is
+provisioned on the runner.
 
 ## Layout
 

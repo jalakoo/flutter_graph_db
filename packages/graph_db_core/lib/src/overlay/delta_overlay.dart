@@ -1,14 +1,14 @@
-/// Per-vid generational delta overlay (plan §3.4).
+/// Per-vid generational delta overlay.
 ///
 /// All post-load mutations land in this overlay. Reads merge CSR base +
-/// overlay inline; a periodic merge (Phase 2E) folds the overlay into a
+/// overlay inline; a periodic merge folds the overlay into a
 /// fresh CSR. This v1 file is the **single-segment** form; the
-/// per-region segmented overlay (Phase 2E) will sit on top.
+/// per-region segmented overlay will sit on top.
 ///
 /// Allocation profile:
 /// - Edge-list deltas use `List<int>` (growable) — overlay rebuilds
 ///   frequently and growable lists amortise better than repeated
-///   `Uint32List` re-allocation. The merge step (Phase 2E) packs them
+///   `Uint32List` re-allocation. The merge step packs them
 ///   into `Uint32List` for the hand-off.
 /// - Sets for "removed" are intentionally `Set<int>` (not `List<int>`)
 ///   so the overlay-aware read path can skip O(n) `.contains` lookups
@@ -67,13 +67,13 @@ class AddedEdge {
   });
 }
 
-/// v1 is single-label per node (multi-label is a Phase 1.1 refinement
-/// per plan §6.4). Label transitions on pre-existing CSR nodes are
+/// v1 is single-label per node (multi-label is a a future refinement
+///). Label transitions on pre-existing CSR nodes are
 /// represented as a flat `vid -> labelId` override map on the overlay.
 /// Reads consult the override first; `null` falls back to
 /// `csr.labelOf[vid]`.
 
-/// The single-segment delta overlay (plan §3.4 v1).
+/// The single-segment delta overlay.
 ///
 /// Keys:
 /// - [outDelta] / [inDelta]: keyed by vid (works for both pre-existing

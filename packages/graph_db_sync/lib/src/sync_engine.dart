@@ -1,4 +1,4 @@
-/// Push-only sync engine (plan §10 / §14 Phase 7).
+/// Push-only sync engine.
 ///
 /// **v1 scope:**
 ///   - one-shot drain via [syncOnce] (push the WAL tail past every
@@ -9,8 +9,8 @@
 ///   - initial seeding via `bulkExport` → `bulkImport`
 ///
 /// **Deferred:**
-///   - HLC + LWW conflict resolution (Phase 7E)
-///   - Opt-in remote-constraint pull (Phase 7H)
+///   - HLC + LWW conflict resolution
+///   - Opt-in remote-constraint pull
 ///   - Bi-directional sync (post-v1)
 ///   - Background timer / change-stream-driven loop (v1 is explicit
 ///     [syncOnce]; callers schedule it).
@@ -170,7 +170,7 @@ class SyncEngine {
   ///
   /// Merges the overlay into the CSR first so the iteration sees a
   /// clean base; the overlay represents already-committed state, so
-  /// this is non-disruptive (Phase 2E merge semantics).
+  /// this is non-disruptive.
   Future<void> _seedTarget(SyncTarget target) async {
     db.state.mergeNow();
     final imports = <ImportOp>[];
@@ -285,7 +285,7 @@ class SyncEngine {
         );
       // DelNode / DelEdge / SetNodeProp / etc. — v1 push-only sync
       // ships them as a future "patch" op shape; for now they're
-      // dropped (full Phase 7B+ ships per-op patches).
+      // dropped (a later iteration will ship per-op patches).
       case DelNode():
       case DelEdge():
       case SetNodeProp():

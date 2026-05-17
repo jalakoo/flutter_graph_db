@@ -1,16 +1,14 @@
-/// Persistent worker-isolate scaffolding ported from `SPIKE_B`.
+/// Persistent worker-isolate scaffolding.
 ///
-/// The spike proved the design (§2.3, plan rewrite): a **single** worker
-/// isolate stays alive for the lifetime of the database, receives
-/// immutable typed-data tasks, computes, and replies — never blocking
-/// the main isolate's event loop. On web, isolates do not exist; this
-/// module provides a synchronous main-isolate fallback so the same call
-/// site works on both targets (pre-work design (c)).
+/// A **single** worker isolate stays alive for the lifetime of the
+/// database, receives immutable typed-data tasks, computes, and
+/// replies — never blocking the main isolate's event loop. On web,
+/// isolates do not exist; this module provides a synchronous
+/// main-isolate fallback so the same call site works on both targets.
 ///
 /// This file is the **plumbing only** — the merge fold, the CSR
-/// payloads, and the `TransferableTypedData` packing land in Phase 2
-/// when the CSR and overlay exist. Phase 0 ships the reusable transport
-/// so the merge can drop in without re-deriving it.
+/// payloads, and the `TransferableTypedData` packing are layered on
+/// top (see `merge_protocol.dart` and `merge_coordinator.dart`).
 library;
 
 import 'dart:async';

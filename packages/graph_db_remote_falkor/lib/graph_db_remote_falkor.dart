@@ -1,6 +1,5 @@
 /// FalkorDB adapter — RESP2 over `dart:io` `Socket` /
-/// `SecureSocket` implementing [`RemoteGraphClient`] (plan §9 /
-/// §14 Phase 4D–4E).
+/// `SecureSocket` implementing [`RemoteGraphClient`].
 library;
 
 export 'src/falkor_client.dart' show FalkorClient, FalkorClientConfig;

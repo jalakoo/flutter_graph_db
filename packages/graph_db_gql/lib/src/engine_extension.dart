@@ -1,4 +1,4 @@
-/// `GraphDb.executeQuery` extension (plan §8 / §14 Phase 3B).
+/// `GraphDb.executeQuery` extension.
 ///
 /// Adds the GQL entry point to the engine without coupling
 /// `graph_db_core` to the parser / planner / executor. Apps that
@@ -259,7 +259,7 @@ extension GqlExecuteQuery on GraphDb {
   /// MERGE single-node — match-or-create. Tries a MATCH first; if any
   /// row binds, returns the projection over the first match. Otherwise
   /// opens a write txn + creates the node, then projects the new
-  /// binding. v1 has no `ON MATCH` / `ON CREATE` clauses (plan §8).
+  /// binding. v1 has no `ON MATCH` / `ON CREATE` clauses.
   Future<QueryResult> _executeMerge(
     MergeStatement stmt,
     Map<String, Object?> params,

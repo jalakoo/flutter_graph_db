@@ -1,11 +1,10 @@
 /// `RemoteGraphClient` port + error hierarchy + capability flags +
-/// result types for the Flutter-native graph DB (plan §9 / §14 Phase
-/// 4A).
+/// result types for the Flutter-native graph DB.
 ///
 /// **Port only.** Concrete adapters (Bolt for Neo4j, RESP for
 /// FalkorDB) live in sibling packages (`graph_db_remote_neo4j`,
 /// `graph_db_remote_falkor`) so consumers pull in only the
-/// dependencies they need (plan §12).
+/// dependencies they need.
 library;
 
 export 'src/capabilities.dart';

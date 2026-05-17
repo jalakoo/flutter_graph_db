@@ -1,4 +1,4 @@
-/// Browser-side [WalStore] backed by IndexedDB (plan §11 / §14 Phase 8).
+/// Browser-side [WalStore] backed by IndexedDB.
 ///
 /// **Schema:**
 ///   - one DB named [dbName] (default `graph_db_wal`)
@@ -15,8 +15,8 @@
 ///
 /// **Validation status.** This adapter follows the IndexedDB spec exactly
 /// and compiles cleanly to `dart2js` + `dart2wasm`. Browser-side
-/// integration tests (`dart test -p chrome`) for it are itself a Phase 8
-/// polish item — the in-memory + io adapters are the validated ones for
+/// integration tests (`dart test -p chrome`) are themselves a polish
+/// follow-up — the in-memory + io adapters are the validated ones for
 /// v1.
 ///
 /// **Native builds.** This file imports `package:web` and only links on

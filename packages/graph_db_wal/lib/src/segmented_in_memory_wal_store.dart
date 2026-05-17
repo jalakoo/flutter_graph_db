@@ -1,10 +1,10 @@
-/// In-memory [WalStore] that rotates segments (plan §6.2 / §14 Phase 2D).
+/// In-memory [WalStore] that rotates segments.
 ///
 /// Each appended frame lands in the active segment. When the active
 /// segment would exceed [segmentSize], a fresh segment is started. The
 /// physical segment boundary makes [truncate] cheap and **aligned** —
 /// it drops whole segments and never rewrites a partial one. The
-/// `dart:io` variant (Phase 2D polish) maps the same shape to one file
+/// `dart:io` variant maps the same shape to one file
 /// per segment.
 library;
 
@@ -15,7 +15,7 @@ import 'package:graph_db_core/graph_db_core.dart';
 
 import 'wal_store.dart';
 
-/// Per plan §6.2 — 16 MB default segment size.
+/// Per — 16 MB default segment size.
 const int kDefaultWalSegmentBytes = 16 * 1024 * 1024;
 
 class SegmentedInMemoryWalStore implements WalStore {
@@ -23,7 +23,7 @@ class SegmentedInMemoryWalStore implements WalStore {
   /// straddles a segment boundary; if the next append would overflow
   /// the active segment, a fresh segment is started first. Individual
   /// frames larger than [segmentSize] are accepted (one frame per
-  /// segment) but the WAL codec keeps frames small (§6.1).
+  /// segment) but the WAL codec keeps frames small.
   final int segmentSize;
 
   /// Closed segments — their bytes are immutable once written.

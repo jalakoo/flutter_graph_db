@@ -22,12 +22,11 @@ class _BfsScratch {
         frontier = Uint32List(nodeCount);
 }
 
-/// Runs all Phase-1 read workloads against `graph_db_core`'s real API
+/// Runs all read workloads against `graph_db_core`'s real API
 /// (`MutableGraphState` + `GraphDb`) on a fresh R-MAT fixture and
 /// returns the full report as a string.
 ///
-/// Mirrors `SPIKE_A/lib/runner.dart`'s output so numbers are directly
-/// comparable to the spike record. [conn] supplies the JIT GC signal;
+/// [conn] supplies the JIT GC signal;
 /// pass an unavailable [SelfConnection] (`SelfConnection(null, null)`)
 /// for latency-only runs (AOT, device).
 Future<String> runReadWorkloads({
@@ -43,7 +42,7 @@ Future<String> runReadWorkloads({
   final bfsNodes = quick ? 1 << 12 : 1 << 14;
   final bfsEdges = quick ? 20000 : 100000;
 
-  out.writeln('=== graph_db_bench — Phase 1 read workloads ===');
+  out.writeln('=== graph_db_bench — read workloads ===');
   out.writeln('env: $envLabel  |  ${quick ? 'quick' : 'full'} fixtures');
   out.writeln(conn.available
       ? 'gc signal: ON (vm-service connected)'
@@ -69,8 +68,7 @@ Future<String> runReadWorkloads({
 
   // --- Workload inputs -----------------------------------------------------
   final rng = Random(0xA110C0DE);
-  // Hub seeds for neighbour traversal (Spike A finding — random seeds in
-  // a sparse graph measure per-call overhead instead of per-element cost).
+  // Hub seeds for neighbour traversal.
   final neighborSeeds =
       topOutDegreeVids(big.csr, quick ? 512 : 4096);
   final hubMaxDeg = big.csr.outDegree(neighborSeeds.first);
@@ -106,9 +104,10 @@ Future<String> runReadWorkloads({
       'out-degree $hubMinDeg..$hubMaxDeg) ---');
   out.writeln(_header());
 
-  // Shape A — `Iterable<({int dst, int eid})>` baseline (the shape plan
-  // §5 explicitly rejects). Synthesised here only so the bench has a
-  // concrete number for "what we'd be paying without the primitive layer".
+  // Shape A — `Iterable<({int dst, int eid})>` baseline (the shape the
+  // primitive read API explicitly rejects). Synthesised here only so the
+  // bench has a concrete number for "what we'd be paying without the
+  // primitive layer".
   Iterable<({int dst, int eid})> iterableNeighbours(Csr csr, int vid) sync* {
     final end = csr.rowPtrOut[vid + 1];
     for (var i = csr.rowPtrOut[vid]; i < end; i++) {
@@ -126,7 +125,7 @@ Future<String> runReadWorkloads({
     return a;
   }
 
-  // Shape B — callback sugar via `GraphDb.forEachOutNeighbor` (plan §5).
+  // Shape B — callback sugar via `GraphDb.forEachOutNeighbor`.
   var cbAcc = 0;
   void cbVisit(Vid dst, Eid eid, int t) {
     cbAcc ^= dst.value ^ eid.value;
@@ -139,7 +138,7 @@ Future<String> runReadWorkloads({
     return cbAcc;
   }
 
-  // Shape C — primitive range API (plan §5: the v1 read shape).
+  // Shape C — primitive range API.
   int primitiveNeighborFold() {
     var a = 0;
     final csr = big.csr;
@@ -280,8 +279,8 @@ Future<String> runReadWorkloads({
   out.writeln('\nnotes:');
   out.writeln('  * gc/op = mean garbage collections triggered per op '
       '(needs the VM service; off on device + AOT).');
-  out.writeln('  * The `primitive` shape is the locked Phase-1 read API '
-      '(plan §5); `iterable` is benched only for comparison and is not '
+  out.writeln('  * The `primitive` shape is the locked read API '
+      '; `iterable` is benched only for comparison and is not '
       'offered by graph_db_core.');
   out.writeln('  * On device / AOT the GC signal is off; latency p99 '
       'spikes are the allocation proxy there.');

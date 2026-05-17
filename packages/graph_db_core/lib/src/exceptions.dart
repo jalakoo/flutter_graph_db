@@ -1,4 +1,4 @@
-/// Public exception hierarchy (plan §7.7). Sealed — exhaustive `switch`
+/// Public exception hierarchy. Sealed — exhaustive `switch`
 /// at any catch boundary.
 sealed class GraphDbException implements Exception {
   final String message;

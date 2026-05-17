@@ -16,8 +16,7 @@ adapters).
   `outNeighbors` / range-style reads, label scans, property accessors.
   (`src/graph_db.dart`)
 - **CSR topology** — `Uint32List` row pointer / column index / edge id
-  arrays for both directions. Cross-platform (web-safe). (§3.1 of the
-  plan)
+  arrays for both directions. Cross-platform (web-safe).
 - **Columnar property store** — per-key typed columns
   (`Float64List` / `Uint8List` / `Uint32List` / `List<String>`),
   raw on the hot path, boxed to `PropValue` only at the API boundary.

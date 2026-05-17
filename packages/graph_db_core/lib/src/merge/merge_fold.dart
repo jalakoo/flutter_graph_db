@@ -1,17 +1,15 @@
-/// Pure overlay-merge fold (plan §3.4 / §14 Phase 2E).
+/// Pure overlay-merge fold.
 ///
 /// Takes the current base [Csr] and a frozen [DeltaOverlay] generation,
 /// returns a fresh [Csr] with every overlay mutation applied. Pure
 /// function — no I/O, no isolate hand-off, no shared state. Top-level
-/// so it's a candidate for the worker-isolate fold (Phase 2E polish);
-/// the v1 ship runs it on the main isolate synchronously.
+/// so it's a candidate for the worker-isolate fold.
 ///
-/// **Phase 2E scope.** Full CSR rebuild — copies every edge into a
-/// fresh `Uint32List`. Simpler than the per-region segmented fold but
+/// **Scope.** Full CSR rebuild — copies every edge into a fresh
+/// `Uint32List`. Simpler than the per-region segmented fold but
 /// stall ∝ edge count. For ≤ 100k edges this is sub-millisecond on
-/// AOT (Spike B numbers). The per-region segmented variant + the
-/// `TransferableTypedData` worker hand-off are scheduled as a Phase 2
-/// polish pass per `4_PLAN.md`'s Phase 2 sub-table.
+/// AOT. The per-region segmented variant + the `TransferableTypedData`
+/// worker hand-off are scheduled as follow-up polish passes.
 library;
 
 import 'dart:typed_data';
@@ -115,7 +113,7 @@ Csr foldOverlayIntoCsr({
   // attached to a node (the index slot for it is still allowed) — we
   // can't ask the interner from here (no reference) so we rely on the
   // newLabelOf max. If a label was interned but unused, its index
-  // bucket simply isn't built; that matches Phase 1 behaviour.
+  // bucket simply isn't built; that matches the baseline behaviour.
 
   return Csr.fromEdges(
     nodeCount: newNodeCount,

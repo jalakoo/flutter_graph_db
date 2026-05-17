@@ -1,9 +1,9 @@
-/// Predicate + projection expression evaluator (plan §8 / §14 Phase 3B).
+/// Predicate + projection expression evaluator.
 ///
 /// Operates on **raw typed values** — `PropValue` is only constructed
-/// at the public API boundary (§3.2 / Spike A). The evaluator unboxes
-/// `PropValue` returned by `nodeProps.getBoxed` immediately and
-/// thereafter works in Dart `int` / `double` / `String` / `bool`.
+/// at the public API boundary. The evaluator unboxes `PropValue`
+/// returned by `nodeProps.getBoxed` immediately and thereafter works
+/// in Dart `int` / `double` / `String` / `bool`.
 library;
 
 import 'package:graph_db_core/graph_db_core.dart';
@@ -132,7 +132,7 @@ class ExpressionEvaluator {
       case PropList():
       case PropMap():
         throw EvalException(
-            'PropList / PropMap eval not supported at boundary (§3.2)');
+            'PropList / PropMap eval not supported at boundary');
     }
   }
 

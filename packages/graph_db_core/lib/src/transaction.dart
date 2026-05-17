@@ -1,20 +1,19 @@
-/// Transaction (plan §2.1, §6.4 / §14 Phase 2B).
+/// Transaction.
 ///
-/// Phase 2B is a **buffer-only** transaction: every mutation method
+/// This is a **buffer-only** transaction: every mutation method
 /// records an unsequenced [WalOp] in an internal buffer + immediately
 /// reserves any allocated `vid` / `eid`. On commit, the runtime
 /// assigns LSNs, wraps every op in a [SequencedWalOp], and feeds the
 /// stream (`BeginTxn` → buffered ops → `CommitTxn`) through the
 /// applicator. On rollback the buffer is dropped — any vids / eids
-/// allocated inside the body are **not** reused (plan §3.6: ids never
-/// reused, intentional cost of monotonic identity).
+/// allocated inside the body are **not** reused.
 ///
 /// **No read-your-writes.** Reads inside the body (`db.outDegree`,
 /// `db.getNodeProp`, etc.) see the **pre-commit** state. Sequence
-/// dependent reads across multiple txns. Phase 6 (ACID hardening) may
-/// add snapshot isolation with proper read-your-writes.
+/// dependent reads across multiple txns. A future ACID-hardening pass
+/// may add snapshot isolation with proper read-your-writes.
 ///
-/// **No nesting, no concurrency.** Plan §2.3 single-writer model.
+/// **No nesting, no concurrency.** single-writer model.
 /// `runTransaction` while a txn is in flight throws.
 library;
 
@@ -34,9 +33,9 @@ class Transaction {
   final List<WalOp> _buffer = [];
 
   /// When `true`, `setNodeProp` / `setEdgeProp` auto-capture the
-  /// current value into `prevValue` (plan §6.4 / §14 Phase 2F). Off
-  /// by default — the capture costs a `getBoxed` per call. Wire on
-  /// for richer audit trails or simpler sync conflict detection.
+  /// current value into `prevValue`. Off by default — the capture
+  /// costs a `getBoxed` per call. Wire on for richer audit trails or
+  /// simpler sync conflict detection.
   final bool capturePrevValues;
 
   bool _terminated = false;
@@ -61,8 +60,7 @@ class Transaction {
   // ----- node mutations -----
 
   /// Allocates a fresh vid, buffers an `AddNode` op, returns the vid.
-  /// [logicalId] defaults to a fresh UUIDv7 (plan §6.3 — time-ordered
-  /// stable identity).
+  /// [logicalId] defaults to a fresh UUIDv7.
   Vid addNode({
     required List<int> labelIds,
     Map<int, PropValue> props = const {},
@@ -97,7 +95,7 @@ class Transaction {
     ));
   }
 
-  /// [prevValue] is opt-in (plan §6.4) — pass-through unless the
+  /// [prevValue] is opt-in — pass-through unless the
   /// owning txn was constructed with [capturePrevValues] = true, in
   /// which case the current value is captured automatically.
   void setNodeProp(
@@ -176,9 +174,9 @@ class Transaction {
     _buffer.add(DelEdgeProp(eid: eid, keyId: keyId));
   }
 
-  // ----- constraint catalog (plan §14 Phase 6C) -----
+  // ----- constraint catalog -----
 
-  /// Records a `DeclareConstraint` WAL op (plan §4 / §14 Phase 6C).
+  /// Records a `DeclareConstraint` WAL op.
   /// The catalog enforcement (validation against existing data,
   /// auto-create of the underlying unique index) runs at apply-time;
   /// if validation fails, the whole txn rolls back.
@@ -196,7 +194,7 @@ class Transaction {
     ));
   }
 
-  /// Drops the constraint named [name] (idempotent — see plan §6.4).
+  /// Drops the constraint named [name] (idempotent — see).
   void dropConstraint(String name) {
     _check();
     _buffer.add(DropConstraint(name: name));
@@ -208,7 +206,7 @@ class Transaction {
 }
 
 /// The sequenced stream a committed txn produces — exposed for tests
-/// and for Phase 2C's WAL writer plumbing.
+/// and for the WAL writer plumbing.
 class SequencedTxn {
   final int txnId;
   final List<SequencedWalOp> ops;

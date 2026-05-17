@@ -8,9 +8,9 @@ import 'engine_view.dart';
 /// example's repository writes to disk and rebuilds the engine state
 /// from on every mutation.
 ///
-/// This stand-in for the eventual `graph_db_wal` (plan §6, CBOR + WAL
-/// framing) is kept inside the example deliberately. Production
-/// persistence is a Phase-2 deliverable that lives in its own package.
+/// This stand-in for the eventual `graph_db_wal` (CBOR + WAL framing)
+/// is kept inside the example deliberately. Production persistence
+/// lives in its own package.
 class GraphData {
   static const int currentVersion = 1;
 
@@ -22,7 +22,7 @@ class GraphData {
 
   /// Indexed by vid. Tombstoned entries set `deleted = true` — they keep
   /// their slot so previously-issued [Vid] handles never silently
-  /// rebind (plan §3.6: vids monotonic from 0, never reused).
+  /// rebind.
   final List<NodeRecord> nodes;
 
   /// Indexed by eid. Same tombstone discipline as [nodes].

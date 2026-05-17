@@ -1,12 +1,12 @@
-/// Snapshot serialization (plan §14 Phase 6D / 6E).
+/// Snapshot serialization.
 ///
 /// **v1 format = JSON.** A binary format (with typed-list zero-copy)
 /// is the obvious polish step; JSON ships fast + is trivially
 /// inspectable + integrates with `dart:convert`. The snapshot
 /// captures the current state in full so recovery doesn't have to
-/// replay the WAL from origin — paired with Phase 2D segment-aligned
-/// truncate (Phase 6E), this bounds startup cost to one snapshot
-/// read + the tail of the WAL since the snapshot.
+/// replay the WAL from origin — paired with the segment-aligned WAL
+/// truncate, this bounds startup cost to one snapshot read + the tail
+/// of the WAL since the snapshot.
 ///
 /// **Scope today:** CSR + node/edge property columns + interner +
 /// constraint catalog. Overlay state is **merged before snapshot**
@@ -296,7 +296,7 @@ List<Map<String, Object?>> _dumpConstraints(List<ConstraintSpec> specs) {
 
 /// Surfaces the per-store keyId iteration — kept here (rather than
 /// on `PropertyStore`) because the snapshot is the only public
-/// consumer. Phase 6D polish promotes this to a `PropertyStore`
+/// consumer. A future polish step may promote this to a `PropertyStore`
 /// public iterator.
 extension on PropertyStore {
   Iterable<int> get declaredKeyIds sync* {
