@@ -1,8 +1,13 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'csr.dart';
 import 'exceptions.dart';
 import 'ids.dart';
+import 'merge/merge_coordinator.dart';
+import 'merge/merge_fold.dart';
+import 'overlay/delta_overlay.dart';
+import 'prop_value.dart';
 import 'property_store.dart';
 import 'secondary_index/index_size_event.dart';
 import 'secondary_index/index_spec.dart';
@@ -22,16 +27,189 @@ import 'string_interner.dart';
 /// fastest on AOT.
 class MutableGraphState {
   final StringInterner strings;
-  final Csr csr;
+  Csr _csr;
   final PropertyStore nodeProps;
   final PropertyStore edgeProps;
+  final DeltaOverlay overlay;
+
+  /// Current CSR. Re-bound by [installMergedCsr] when the overlay
+  /// folds into a fresh CSR (plan §3.4 / §14 Phase 2E). Callers that
+  /// cache the reference across an `await` should re-read after the
+  /// await — same shape as `state.csr` outside a transaction.
+  Csr get csr => _csr;
+
+  /// Eid -> source vid (within the CSR base only). Rebuilt by
+  /// [installMergedCsr]. Used by [applyDelEdge] to resolve a
+  /// base-CSR edge's endpoints without a linear scan.
+  Uint32List _baseCsrEidToSrc;
+  Uint32List get baseCsrEidToSrc => _baseCsrEidToSrc;
+
+  /// Eid -> destination vid (within the CSR base only). Rebuilt by
+  /// [installMergedCsr].
+  Uint32List _baseCsrEidToDst;
+  Uint32List get baseCsrEidToDst => _baseCsrEidToDst;
+
+  /// Soft merge trigger override (plan §14 Phase 2E). When `null`,
+  /// the formula `max(10_000, 5 % of csr.edgeCount)` is used per
+  /// §3.4. Tests set a small value to force a merge after a handful
+  /// of mutations.
+  int? mergeThreshold;
+
+  /// Optional worker-isolate merge coordinator (plan §2.3 / §14
+  /// Phase 2 polish). When set, [maybeMergeOverlayAsync] hands the
+  /// fold off to the worker and the main-isolate stall is only the
+  /// copy + install cost. When `null`, the same call falls back to
+  /// the synchronous [mergeNow] path. Set via
+  /// `MergeCoordinator.spawn()` and assign before any merge would
+  /// fire.
+  MergeCoordinator? mergeCoordinator;
+
+  int _nextVid;
+  int _nextEid;
+
+  /// LSN assigned to the next [SequencedWalOp]. Phase 2B uses a simple
+  /// counter; Phase 2C replaces this with the WAL byte offset.
+  int _nextLsn;
+
+  /// Txn id assigned to the next transaction. Phase 2B counter; in
+  /// later phases the WAL header carries the highest txn id for
+  /// recovery to resume from.
+  int _nextTxnId;
+
+  /// The currently-active txn id, or `null` if no txn is in flight.
+  /// Phase 2B single-writer (plan §2.3) — a second `runTransaction`
+  /// while [activeTxnId] is non-null throws.
+  int? activeTxnId;
 
   MutableGraphState({
     required this.strings,
-    required this.csr,
+    required Csr csr,
     required this.nodeProps,
     required this.edgeProps,
-  });
+    DeltaOverlay? overlay,
+    int? nextVid,
+    int? nextEid,
+    int nextLsn = 0,
+    int nextTxnId = 1,
+    this.mergeThreshold,
+  })  : _csr = csr,
+        overlay = overlay ?? DeltaOverlay(),
+        _nextVid = nextVid ?? csr.nodeCount,
+        _nextEid = nextEid ?? csr.edgeCount,
+        _nextLsn = nextLsn,
+        _nextTxnId = nextTxnId,
+        _baseCsrEidToSrc = _buildEidToSrc(csr),
+        _baseCsrEidToDst = _buildEidToDst(csr);
+
+  static Uint32List _buildEidToSrc(Csr csr) {
+    final out = Uint32List(csr.edgeCount);
+    for (var v = 0; v < csr.nodeCount; v++) {
+      final end = csr.rowPtrOut[v + 1];
+      for (var i = csr.rowPtrOut[v]; i < end; i++) {
+        out[csr.edgeIdOut[i]] = v;
+      }
+    }
+    return out;
+  }
+
+  static Uint32List _buildEidToDst(Csr csr) {
+    final out = Uint32List(csr.edgeCount);
+    for (var v = 0; v < csr.nodeCount; v++) {
+      final end = csr.rowPtrOut[v + 1];
+      for (var i = csr.rowPtrOut[v]; i < end; i++) {
+        out[csr.edgeIdOut[i]] = csr.colIdxOut[i];
+      }
+    }
+    return out;
+  }
+
+  /// Next vid the allocator will issue. Read-only; mutate via
+  /// [allocVid] (or have the applicator fast-forward via [applyAddNode]).
+  int get nextVid => _nextVid;
+
+  /// Next eid the allocator will issue. Read-only; mutate via
+  /// [allocEid] (or have the applicator fast-forward via [applyAddEdge]).
+  int get nextEid => _nextEid;
+
+  /// Next LSN the WAL pipeline will issue. Read-only; mutate via
+  /// [allocLsn].
+  int get nextLsn => _nextLsn;
+
+  /// Next txn id the runtime will issue. Read-only; mutate via
+  /// [allocTxnId].
+  int get nextTxnId => _nextTxnId;
+
+  /// Returns a fresh monotonic LSN and bumps the counter.
+  int allocLsn() => _nextLsn++;
+
+  /// Returns a fresh monotonic txn id and bumps the counter.
+  int allocTxnId() => _nextTxnId++;
+
+  // ----- Merge trigger (plan §3.4, §14 Phase 2E) ---------------------------
+
+  /// Total overlay mutation count. Threshold metric for the merge
+  /// trigger (plan §14: `max(10_000, 5 %)`).
+  int get overlayMutationCount =>
+      overlay.addedEdges.length + overlay.deletedEdges.length;
+
+  /// Effective merge threshold. Honors [mergeThreshold] if set;
+  /// otherwise the formula `max(10_000, 5 % of csr.edgeCount)`.
+  int get effectiveMergeThreshold =>
+      mergeThreshold ?? math.max(10000, (csr.edgeCount * 0.05).toInt());
+
+  /// True when the overlay has grown past [effectiveMergeThreshold].
+  bool get shouldMerge =>
+      overlayMutationCount >= effectiveMergeThreshold;
+
+  /// Folds [overlay] into a fresh CSR and installs it via
+  /// [installMergedCsr]. **Synchronous** main-isolate fold for v1 —
+  /// the worker-isolate hand-off (Spike B design) is a Phase 2 polish
+  /// follow-up; the merge-stall <1 ms acceptance metric requires it
+  /// for graphs much larger than the 100 k bench fixture (see
+  /// `4_PLAN.md` Phase 2 sub-table).
+  void mergeNow() {
+    if (overlay.isEmpty) return;
+    final fresh = foldOverlayIntoCsr(base: _csr, overlay: overlay);
+    installMergedCsr(fresh);
+  }
+
+  /// Convenience — runs [mergeNow] if [shouldMerge] is true; returns
+  /// whether a merge was performed. Wired into `GraphDb._commit` so
+  /// every transaction commit pays the threshold check.
+  bool maybeMergeOverlay() {
+    if (!shouldMerge) return false;
+    mergeNow();
+    return true;
+  }
+
+  /// Async variant — uses [mergeCoordinator] (worker isolate) when
+  /// set, otherwise falls back to [mergeNow]. Main-isolate stall in
+  /// the worker path is bounded by copy + install (the fold runs
+  /// off-main). Plan §14 acceptance metric: `< 1 ms` p99 stall.
+  Future<bool> maybeMergeOverlayAsync() async {
+    if (!shouldMerge) return false;
+    final coord = mergeCoordinator;
+    if (coord == null) {
+      mergeNow();
+      return true;
+    }
+    // `coord.merge` copies the live CSR + overlay (main-isolate cost),
+    // awaits the worker fold, returns the fresh CSR. Install is a
+    // pointer-swap.
+    final fresh = await coord.merge(_csr, overlay);
+    installMergedCsr(fresh);
+    return true;
+  }
+
+  /// Replaces the current CSR with [newCsr] and clears the overlay.
+  /// Called by [mergeNow]; exposed publicly so tests + the worker
+  /// follow-up can install a CSR built off-main.
+  void installMergedCsr(Csr newCsr) {
+    _csr = newCsr;
+    _baseCsrEidToSrc = _buildEidToSrc(newCsr);
+    _baseCsrEidToDst = _buildEidToDst(newCsr);
+    overlay.clear();
+  }
 
   /// Builds an in-memory state from a synthetic / loader edge list.
   ///
@@ -159,6 +337,342 @@ class MutableGraphState {
       edgeProps.getString(eid.value, keyId);
   int getEdgeStringIdProp(Eid eid, int keyId) =>
       edgeProps.getStringId(eid.value, keyId);
+
+  // ----- Allocators (plan §3.6 — vid never reused) -------------------------
+
+  /// Returns a fresh [Vid] and grows [nodeProps] so the new vid can
+  /// hold properties. Bumps [nextVid]. Transaction builders call this
+  /// before constructing an `AddNode` WalOp.
+  Vid allocVid() {
+    final v = _nextVid++;
+    _ensureNodeCapacity(v);
+    return Vid(v);
+  }
+
+  /// Returns a fresh [Eid] and grows [edgeProps] so the new eid can
+  /// hold properties. Bumps [nextEid].
+  Eid allocEid() {
+    final e = _nextEid++;
+    _ensureEdgeCapacity(e);
+    return Eid(e);
+  }
+
+  void _ensureNodeCapacity(int vid) {
+    if (vid >= nodeProps.vidSpace) {
+      var newSize = nodeProps.vidSpace == 0 ? 16 : nodeProps.vidSpace;
+      while (newSize <= vid) {
+        newSize *= 2;
+      }
+      nodeProps.growVidSpace(newSize);
+    }
+  }
+
+  void _ensureEdgeCapacity(int eid) {
+    if (eid >= edgeProps.vidSpace) {
+      var newSize = edgeProps.vidSpace == 0 ? 16 : edgeProps.vidSpace;
+      while (newSize <= eid) {
+        newSize *= 2;
+      }
+      edgeProps.growVidSpace(newSize);
+    }
+  }
+
+  // ----- Mutation appliers (plan §2.1 — the single mutation path) ----------
+  //
+  // These are the methods the applicator (`apply()`) routes WalOp arms
+  // to. Transaction builders call [allocVid] / [allocEid] first to
+  // assign ids, then construct the WalOp, then feed it through `apply`.
+  //
+  // Phase 2A: writes land in the [DeltaOverlay] (or directly in
+  // [PropertyStore] for property ops, since the property store has no
+  // overlay layer — values are mutable in place). Phase 2C wires WAL
+  // persistence around these calls; Phase 2E wires the worker-isolate
+  // merge that folds the overlay back into the CSR base.
+
+  /// Applies an `AddNode` WAL op. Fast-forwards [nextVid] so future
+  /// allocations stay monotonic even when [vid] was minted elsewhere
+  /// (recovery, sync replay).
+  void applyAddNode(
+    Vid vid, {
+    required String logicalId,
+    required List<int> labelIds,
+    required Map<int, PropValue> props,
+  }) {
+    if (overlay.deletedNodes.contains(vid.value)) {
+      throw ConstraintViolation(
+          'cannot AddNode at vid ${vid.value}: already tombstoned '
+          '(vids are never reused — plan §3.6)');
+    }
+    if (vid.value >= _nextVid) {
+      _nextVid = vid.value + 1;
+      _ensureNodeCapacity(vid.value);
+    }
+    if (labelIds.isEmpty) {
+      throw ConstraintViolation(
+          'AddNode requires at least one label id (v1 single-label '
+          'storage — multi-label is Phase 1.1)');
+    }
+    if (labelIds.length > 1) {
+      throw ConstraintViolation(
+          'AddNode given ${labelIds.length} labels; v1 is single-label '
+          '(plan §6.4 multi-label is Phase 1.1)');
+    }
+    overlay.recordAddNode(
+      vid.value,
+      AddedNode(logicalId: logicalId, labelIds: List.of(labelIds)),
+    );
+    for (final e in props.entries) {
+      _writeNodeProp(vid.value, e.key, e.value);
+    }
+  }
+
+  /// Applies a `DelNode` WAL op. Cascades — every incident edge
+  /// (forward + reverse, CSR base + overlay added) is also marked
+  /// deleted.
+  void applyDelNode(Vid vid) {
+    if (!_nodeExists(vid.value)) return; // idempotent
+    // Snapshot incident eids first so the iteration is stable while
+    // we mutate the overlay underneath.
+    final outEids = <int>[];
+    forEachOutEdge(vid, (e, _, __) => outEids.add(e.value));
+    final inEids = <int>[];
+    forEachInEdge(vid, (e, _, __) => inEids.add(e.value));
+    for (final e in outEids) {
+      applyDelEdge(Eid(e));
+    }
+    for (final e in inEids) {
+      applyDelEdge(Eid(e));
+    }
+    overlay.recordDelNode(vid.value);
+  }
+
+  /// Applies a `SetNodeLabels` WAL op under v1's single-label
+  /// constraint. Accepts `(added: [newLabel], removed: [oldLabel])`
+  /// (a relabel) or `(added: [], removed: [oldLabel])` and `(added:
+  /// [newLabel], removed: [])` are also accepted as no-replace /
+  /// no-prior single-label transitions.
+  void applySetNodeLabels(
+    Vid vid, {
+    required List<int> added,
+    required List<int> removed,
+  }) {
+    if (added.length > 1 || removed.length > 1) {
+      throw ConstraintViolation(
+          'SetNodeLabels v1 single-label only (added=${added.length}, '
+          'removed=${removed.length}); multi-label is Phase 1.1');
+    }
+    if (!_nodeExists(vid.value)) {
+      throw NotFoundException('SetNodeLabels on absent vid ${vid.value}');
+    }
+    if (added.isEmpty) return; // removed-only is a no-op under single-label
+    final newLabel = added.first;
+    // Overlay-added node? mutate AddedNode.labelIds in place.
+    final addedNode = overlay.addedNodes[vid.value];
+    if (addedNode != null) {
+      addedNode.labelIds
+        ..clear()
+        ..add(newLabel);
+    } else {
+      overlay.recordSetNodeLabel(vid.value, newLabel);
+    }
+  }
+
+  /// Applies a `SetNodeProp` WAL op.
+  void applySetNodeProp(Vid vid, int keyId, PropValue value) {
+    if (!_nodeExists(vid.value)) {
+      throw NotFoundException('SetNodeProp on absent vid ${vid.value}');
+    }
+    _writeNodeProp(vid.value, keyId, value);
+  }
+
+  /// Applies a `DelNodeProp` WAL op.
+  void applyDelNodeProp(Vid vid, int keyId) {
+    nodeProps.remove(vid.value, keyId);
+  }
+
+  /// Applies an `AddEdge` WAL op. Fast-forwards [nextEid].
+  void applyAddEdge(
+    Eid eid, {
+    required String logicalId,
+    required Vid src,
+    required Vid dst,
+    required int typeId,
+    required Map<int, PropValue> props,
+  }) {
+    if (overlay.deletedEdges.contains(eid.value)) {
+      throw ConstraintViolation(
+          'cannot AddEdge at eid ${eid.value}: already tombstoned '
+          '(eids are never reused)');
+    }
+    if (eid.value >= _nextEid) {
+      _nextEid = eid.value + 1;
+      _ensureEdgeCapacity(eid.value);
+    }
+    if (!_nodeExists(src.value)) {
+      throw NotFoundException(
+          'AddEdge src vid ${src.value} does not exist');
+    }
+    if (!_nodeExists(dst.value)) {
+      throw NotFoundException(
+          'AddEdge dst vid ${dst.value} does not exist');
+    }
+    overlay.recordAddEdge(
+      AddedEdge(
+        logicalId: logicalId,
+        src: src.value,
+        dst: dst.value,
+        typeId: typeId,
+      ),
+      eid.value,
+    );
+    for (final e in props.entries) {
+      _writeEdgeProp(eid.value, e.key, e.value);
+    }
+  }
+
+  /// Applies a `DelEdge` WAL op. Resolves the edge's endpoints (CSR
+  /// base via [baseCsrEidToSrc] / [baseCsrEidToDst], or the overlay's
+  /// [DeltaOverlay.addedEdges]) and records tombstones on both
+  /// directions.
+  void applyDelEdge(Eid eid) {
+    if (overlay.deletedEdges.contains(eid.value)) return; // idempotent
+    final added = overlay.addedEdges[eid.value];
+    if (added != null) {
+      overlay.recordDelEdge(eid.value, src: added.src, dst: added.dst);
+      return;
+    }
+    if (eid.value >= csr.edgeCount) {
+      throw NotFoundException('DelEdge on unknown eid ${eid.value}');
+    }
+    final src = baseCsrEidToSrc[eid.value];
+    final dst = baseCsrEidToDst[eid.value];
+    overlay.recordDelEdge(eid.value, src: src, dst: dst);
+  }
+
+  /// Applies a `SetEdgeProp` WAL op.
+  void applySetEdgeProp(Eid eid, int keyId, PropValue value) {
+    _writeEdgeProp(eid.value, keyId, value);
+  }
+
+  /// Applies a `DelEdgeProp` WAL op.
+  void applyDelEdgeProp(Eid eid, int keyId) {
+    edgeProps.remove(eid.value, keyId);
+  }
+
+  void _writeNodeProp(int vid, int keyId, PropValue value) =>
+      _writeProp(nodeProps, vid, keyId, value);
+
+  void _writeEdgeProp(int eid, int keyId, PropValue value) =>
+      _writeProp(edgeProps, eid, keyId, value);
+
+  void _writeProp(PropertyStore store, int id, int keyId, PropValue value) {
+    switch (value) {
+      case PropInt(:final value):
+        store.setInt(id, keyId, value);
+      case PropDouble(:final value):
+        store.setDouble(id, keyId, value);
+      case PropBool(:final value):
+        store.setBool(id, keyId, value);
+      case PropString(:final value):
+        store.setString(id, keyId, value);
+      case PropNull():
+        store.setNull(id, keyId);
+      case PropList():
+      case PropMap():
+        throw ConstraintViolation(
+            'PropList / PropMap cannot be stored in a typed column '
+            '(plan §3.2). Decompose at the boundary.');
+    }
+  }
+
+  // ----- Overlay-aware reads (plan §2 — base + overlay) --------------------
+
+  /// True if [vid] is a live node (not tombstoned, and either in the
+  /// CSR base or in the overlay's added-nodes map).
+  bool isNodeVisible(Vid vid) => _nodeExists(vid.value);
+
+  bool _nodeExists(int v) {
+    if (overlay.deletedNodes.contains(v)) return false;
+    if (v < csr.nodeCount) return true;
+    return overlay.addedNodes.containsKey(v);
+  }
+
+  /// The effective single label for [vid] — overlay override first,
+  /// then [AddedNode.labelIds.first], then `csr.labelOf[vid]`.
+  int effectiveLabelOf(Vid vid) {
+    final override = overlay.labelOverride[vid.value];
+    if (override != null) return override;
+    final added = overlay.addedNodes[vid.value];
+    if (added != null) return added.labelIds.first;
+    return csr.labelOf[vid.value];
+  }
+
+  /// Iterates the live outgoing edges of [vid] — CSR slice (filtered
+  /// against the overlay's removed set) followed by overlay-added
+  /// edges. Allocation-free.
+  void forEachOutEdge(
+    Vid vid,
+    void Function(Eid eid, Vid dst, int edgeType) visit,
+  ) {
+    if (!_nodeExists(vid.value)) return;
+    final delta = overlay.outDelta[vid.value];
+    final removed = delta?.removed;
+    if (vid.value < _csr.nodeCount) {
+      final end = _csr.rowPtrOut[vid.value + 1];
+      for (var i = _csr.rowPtrOut[vid.value]; i < end; i++) {
+        final eid = _csr.edgeIdOut[i];
+        if (removed != null && removed.contains(eid)) continue;
+        if (overlay.deletedNodes.contains(_csr.colIdxOut[i])) continue;
+        visit(Eid(eid), Vid(_csr.colIdxOut[i]), _csr.edgeTypeOut[i]);
+      }
+    }
+    if (delta != null) {
+      for (final e in delta.added) {
+        if (overlay.deletedNodes.contains(e.neighbor)) continue;
+        visit(Eid(e.eid), Vid(e.neighbor), e.edgeType);
+      }
+    }
+  }
+
+  /// Iterates the live incoming edges of [vid]. Same shape as
+  /// [forEachOutEdge].
+  void forEachInEdge(
+    Vid vid,
+    void Function(Eid eid, Vid src, int edgeType) visit,
+  ) {
+    if (!_nodeExists(vid.value)) return;
+    final delta = overlay.inDelta[vid.value];
+    final removed = delta?.removed;
+    if (vid.value < _csr.nodeCount) {
+      final end = _csr.rowPtrIn[vid.value + 1];
+      for (var i = _csr.rowPtrIn[vid.value]; i < end; i++) {
+        final eid = _csr.edgeIdIn[i];
+        if (removed != null && removed.contains(eid)) continue;
+        if (overlay.deletedNodes.contains(_csr.colIdxIn[i])) continue;
+        visit(Eid(eid), Vid(_csr.colIdxIn[i]), _csr.edgeTypeIn[i]);
+      }
+    }
+    if (delta != null) {
+      for (final e in delta.added) {
+        if (overlay.deletedNodes.contains(e.neighbor)) continue;
+        visit(Eid(e.eid), Vid(e.neighbor), e.edgeType);
+      }
+    }
+  }
+
+  /// Out-degree with overlay applied. O(degree).
+  int effectiveOutDegree(Vid vid) {
+    var n = 0;
+    forEachOutEdge(vid, (_, __, ___) => n++);
+    return n;
+  }
+
+  /// In-degree with overlay applied. O(degree).
+  int effectiveInDegree(Vid vid) {
+    var n = 0;
+    forEachInEdge(vid, (_, __, ___) => n++);
+    return n;
+  }
 
   // ----- Secondary index registry (plan §3.3) ------------------------------
   //

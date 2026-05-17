@@ -8,3 +8,4 @@ export 'src/hub_seeds.dart';
 export 'src/latency.dart';
 export 'src/rmat.dart';
 export 'src/runner.dart';
+export 'src/write_runner.dart';

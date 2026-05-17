@@ -23,14 +23,14 @@ class _Column {
   static const int _absent = 0xFFFFFFFF;
 
   final ColumnType type;
-  final int vidSpace;
+  int vidSpace;
 
   /// `Int64List` / `Float64List` / `Uint8List` (bool) / `Uint32List`
   /// (interned string id) depending on [type].
   Object values;
 
   /// Length [vidSpace]. `_absent` ⇒ key not set on this vid.
-  final Uint32List vidToSlot;
+  Uint32List vidToSlot;
 
   /// Bitmap of [capacity] bits. Bit `i` set ⇒ slot `i` is explicit null.
   Uint32List isNull;
@@ -135,12 +135,32 @@ class _Column {
 /// Edges share the same shape, keyed by `eid` and constructed against a
 /// separate `eidSpace` value (or use a second [PropertyStore] instance).
 class PropertyStore {
-  /// Upper bound on `vid` (or `eid`) values this store handles.
-  final int vidSpace;
+  /// Upper bound on `vid` (or `eid`) values this store handles. Grown
+  /// via [growVidSpace] when the mutation path allocates a vid past
+  /// the current space (plan §2 — overlay holds the new node, but its
+  /// property slots live here).
+  int vidSpace;
 
   final Map<int, _Column> _columns = {};
 
   PropertyStore({required this.vidSpace});
+
+  /// Grows [vidSpace] (and every column's `vidToSlot` array) so vids
+  /// up to `newSize - 1` can hold values. No-op if `newSize <=
+  /// vidSpace`. Each column doubles its `vidToSlot` size on demand
+  /// elsewhere — this method is the bulk grow used by the allocator
+  /// when a fresh vid is requested past the current ceiling.
+  void growVidSpace(int newSize) {
+    if (newSize <= vidSpace) return;
+    for (final col in _columns.values) {
+      final grown = Uint32List(newSize)
+        ..fillRange(0, newSize, _Column._absent)
+        ..setRange(0, col.vidToSlot.length, col.vidToSlot);
+      col.vidToSlot = grown;
+      col.vidSpace = newSize;
+    }
+    vidSpace = newSize;
+  }
 
   // ---------------------------------------------------------------- catalog
 

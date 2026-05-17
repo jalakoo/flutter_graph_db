@@ -37,26 +37,57 @@ void apply(
     case InternString(:final intId, :final value, :final kind):
       _applyInternString(state, intId, value, kind);
       return;
-    case AddNode():
-      throw UnimplementedError(
-          'AddNode applies in Phase 2 — MutableGraphState mutation '
-          'methods are not yet defined.');
-    case DelNode():
-      throw UnimplementedError('DelNode applies in Phase 2.');
-    case SetNodeLabels():
-      throw UnimplementedError('SetNodeLabels applies in Phase 2.');
-    case SetNodeProp():
-      throw UnimplementedError('SetNodeProp applies in Phase 2.');
-    case DelNodeProp():
-      throw UnimplementedError('DelNodeProp applies in Phase 2.');
-    case AddEdge():
-      throw UnimplementedError('AddEdge applies in Phase 2.');
-    case DelEdge():
-      throw UnimplementedError('DelEdge applies in Phase 2.');
-    case SetEdgeProp():
-      throw UnimplementedError('SetEdgeProp applies in Phase 2.');
-    case DelEdgeProp():
-      throw UnimplementedError('DelEdgeProp applies in Phase 2.');
+    case AddNode(
+        :final vid,
+        :final logicalId,
+        :final labelIds,
+        :final props,
+      ):
+      state.applyAddNode(
+        vid,
+        logicalId: logicalId,
+        labelIds: labelIds,
+        props: props,
+      );
+      return;
+    case DelNode(:final vid):
+      state.applyDelNode(vid);
+      return;
+    case SetNodeLabels(:final vid, :final added, :final removed):
+      state.applySetNodeLabels(vid, added: added, removed: removed);
+      return;
+    case SetNodeProp(:final vid, :final keyId, :final value):
+      state.applySetNodeProp(vid, keyId, value);
+      return;
+    case DelNodeProp(:final vid, :final keyId):
+      state.applyDelNodeProp(vid, keyId);
+      return;
+    case AddEdge(
+        :final eid,
+        :final logicalId,
+        :final src,
+        :final dst,
+        :final typeId,
+        :final props,
+      ):
+      state.applyAddEdge(
+        eid,
+        logicalId: logicalId,
+        src: src,
+        dst: dst,
+        typeId: typeId,
+        props: props,
+      );
+      return;
+    case DelEdge(:final eid):
+      state.applyDelEdge(eid);
+      return;
+    case SetEdgeProp(:final eid, :final keyId, :final value):
+      state.applySetEdgeProp(eid, keyId, value);
+      return;
+    case DelEdgeProp(:final eid, :final keyId):
+      state.applyDelEdgeProp(eid, keyId);
+      return;
     case DeclareConstraint():
       throw UnimplementedError(
           'DeclareConstraint applies in Phase 6 (constraint catalog).');

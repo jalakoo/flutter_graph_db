@@ -10,6 +10,7 @@
 library;
 
 export 'src/applicator.dart';
+export 'src/bulk_edge.dart';
 export 'src/csr.dart';
 export 'src/durability.dart';
 export 'src/exceptions.dart';
@@ -18,7 +19,11 @@ export 'src/identity/hlc.dart';
 export 'src/identity/uuid_v7.dart';
 export 'src/ids.dart';
 export 'src/isolate/persistent_worker.dart';
+export 'src/merge/merge_coordinator.dart';
+export 'src/merge/merge_fold.dart';
+export 'src/merge/merge_protocol.dart';
 export 'src/mutable_graph_state.dart';
+export 'src/overlay/delta_overlay.dart';
 export 'src/platform.dart';
 export 'src/prop_value.dart';
 export 'src/property_store.dart';
@@ -26,4 +31,6 @@ export 'src/secondary_index/index_size_event.dart';
 export 'src/secondary_index/index_spec.dart';
 export 'src/secondary_index/secondary_index.dart';
 export 'src/string_interner.dart';
+export 'src/transaction.dart' hide markTransactionTerminated;
 export 'src/wal_op.dart';
+export 'src/wal_sink.dart';

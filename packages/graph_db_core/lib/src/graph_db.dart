@@ -1,13 +1,25 @@
+import 'dart:async';
 import 'dart:typed_data';
 
+import 'applicator.dart';
+import 'bulk_edge.dart';
 import 'csr.dart';
+import 'durability.dart';
+import 'exceptions.dart';
+import 'identity/uuid_v7.dart';
 import 'ids.dart';
+import 'merge/merge_fold.dart';
 import 'mutable_graph_state.dart';
+import 'overlay/delta_overlay.dart';
 import 'prop_value.dart';
 import 'property_store.dart';
 import 'secondary_index/index_size_event.dart';
 import 'secondary_index/index_spec.dart';
 import 'secondary_index/secondary_index.dart';
+import 'string_interner.dart';
+import 'transaction.dart';
+import 'wal_op.dart';
+import 'wal_sink.dart';
 
 /// Public facade over the engine (plan §7.1).
 ///
@@ -20,12 +32,45 @@ import 'secondary_index/secondary_index.dart';
 class GraphDb {
   final MutableGraphState _state;
 
-  GraphDb._(this._state);
+  /// Optional WAL sink (plan §2.2). When non-null, every committed
+  /// transaction's sequenced ops are appended through this sink with
+  /// [Durability.fsync] before the applicator mutates state. When
+  /// null, the engine runs purely in-memory (tests + the read-only
+  /// fixture flow).
+  final WalSink? _sink;
+
+  /// `InternString` ops queued between transactions, flushed at the
+  /// front of the next commit so recovery sees the catalog growth in
+  /// the order it was applied (plan §3.5, §6.4).
+  final List<InternString> _pendingInterns = [];
+
+  GraphDb._(this._state, [this._sink]);
 
   /// Wraps an already-built [MutableGraphState] — the Phase-1 entry
   /// point. Fixture loaders (e.g. `SocialGraph.build()` from
   /// `package:graph_db_core/samples.dart`) hand back a [GraphDb] this way.
-  factory GraphDb.fromState(MutableGraphState state) => GraphDb._(state);
+  ///
+  /// Pass [sink] to enable WAL writes on commit (Phase 2C). The sink
+  /// is closed by [close]. `graph_db_wal`'s `WalWriter` is the
+  /// production-grade implementation.
+  factory GraphDb.fromState(MutableGraphState state, {WalSink? sink}) =>
+      GraphDb._(state, sink);
+
+  /// Closes the engine: flushes any pending `InternString` ops as a
+  /// final empty-but-not-quite commit (if a sink is configured), then
+  /// closes the sink. Safe to call once; subsequent commit attempts
+  /// fail at the sink layer.
+  Future<void> close() async {
+    if (_sink != null && _pendingInterns.isNotEmpty) {
+      // Flush pending interns through an empty user-op txn so they
+      // land in the WAL with proper Begin/Commit framing. Use
+      // `fsync` so the close-time data is durable before the sink
+      // shuts down — group-commit's deferred ack would otherwise
+      // race with `close`.
+      await runTransaction((_) {}, durability: Durability.fsync);
+    }
+    await _sink?.close();
+  }
 
   /// Underlying state — for advanced callers and tests. The public API
   /// here covers the documented Phase-1 surface; Phase 2 will lock this
@@ -37,10 +82,49 @@ class GraphDb {
   Csr get csr => _state.csr;
 
   // ---------------------------------------------------------------- catalog
+  //
+  // Sync — the WAL is not touched here. Newly-interned strings are
+  // queued in [_pendingInterns] and prepended to the next transaction
+  // commit so recovery agrees on ids before any op references them.
 
-  int internLabel(String name) => _state.strings.internLabel(name);
-  int internEdgeType(String name) => _state.strings.internEdgeType(name);
-  int internPropKey(String name) => _state.strings.internPropKey(name);
+  int internLabel(String name) => _internInto(
+        existing: _state.strings.labelIdOf(name),
+        intern: _state.strings.internLabel,
+        kind: StringKind.label,
+        value: name,
+      );
+
+  int internEdgeType(String name) => _internInto(
+        existing: _state.strings.edgeTypeIdOf(name),
+        intern: _state.strings.internEdgeType,
+        kind: StringKind.edgeType,
+        value: name,
+      );
+
+  int internPropKey(String name) => _internInto(
+        existing: _state.strings.propKeyIdOf(name),
+        intern: _state.strings.internPropKey,
+        kind: StringKind.propKey,
+        value: name,
+      );
+
+  int _internInto({
+    required int? existing,
+    required int Function(String) intern,
+    required StringKind kind,
+    required String value,
+  }) {
+    if (existing != null) return existing;
+    final id = intern(value);
+    if (_sink != null) {
+      _pendingInterns.add(InternString(
+        intId: id,
+        value: value,
+        kind: kind,
+      ));
+    }
+    return id;
+  }
 
   String? labelName(int id) => _state.strings.labelOf(id);
   String? edgeTypeName(int id) => _state.strings.edgeTypeOf(id);
@@ -148,6 +232,244 @@ class GraphDb {
       _state.nodeProps.getBoxed(vid.value, keyId);
   PropValue? getEdgeProp(Eid eid, int keyId) =>
       _state.edgeProps.getBoxed(eid.value, keyId);
+
+  // ----- Transactions (plan §2.1, §6.4 / §14 Phase 2B) --------------------
+
+  /// Runs [body] inside a transaction.
+  ///
+  /// On normal return, commits: the buffered ops are sealed into a
+  /// `BeginTxn` → ops → `CommitTxn` stream (LSNs assigned in order),
+  /// then routed through the applicator. The return value is forwarded
+  /// to the caller.
+  ///
+  /// On any throw, rolls back: the buffer is dropped and the state
+  /// is untouched. **Allocated vids / eids are still consumed** —
+  /// plan §3.6 (ids never reused). The exception propagates.
+  ///
+  /// Single-writer model (plan §2.3): nested + concurrent
+  /// `runTransaction` calls throw [StateError].
+  ///
+  /// Empty transactions (body queued no ops) are skipped — no `BeginTxn`
+  /// / `CommitTxn` are emitted, no LSNs consumed.
+  /// [durability] — per-call override of the engine default
+  /// (plan §6.7). Defaults to [Durability.group]: this commit lands
+  /// in the next group-fsync window (1 ms by default). Pass
+  /// [Durability.fsync] for a per-commit fsync. Tests that want to
+  /// avoid the group-window wait can pass [Durability.fsync] or
+  /// [Durability.none].
+  ///
+  /// [capturePrevValues] — when `true`, `setNodeProp` / `setEdgeProp`
+  /// inside the txn auto-capture the current value into the WAL op's
+  /// `prevValue` field (plan §6.4 / §14 Phase 2F). Off by default —
+  /// each capture costs a `getBoxed` allocation. Enable for audit
+  /// trails or simpler sync conflict detection.
+  Future<T> runTransaction<T>(
+    FutureOr<T> Function(Transaction txn) body, {
+    Durability durability = Durability.group,
+    bool capturePrevValues = false,
+  }) async {
+    if (_state.activeTxnId != null) {
+      throw StateError(
+          'a transaction (txnId=${_state.activeTxnId}) is already in '
+          'flight — Phase 2B is single-writer (plan §2.3)');
+    }
+    final txnId = _state.allocTxnId();
+    _state.activeTxnId = txnId;
+    final txn = Transaction(
+      txnId,
+      _state,
+      capturePrevValues: capturePrevValues,
+    );
+    try {
+      final result = await body(txn);
+      await _commit(txn, durability);
+      return result;
+    } catch (_) {
+      // Rollback: drop the buffer. Allocated vids/eids are NOT
+      // released — plan §3.6 monotonic identity.
+      rethrow;
+    } finally {
+      _terminate(txn);
+      _state.activeTxnId = null;
+    }
+  }
+
+  Future<void> _commit(Transaction txn, Durability durability) async {
+    // Skip empty txn only when there are no pending interns either —
+    // otherwise we still need to flush the catalog growth.
+    if (txn.bufferedOps.isEmpty && _pendingInterns.isEmpty) return;
+    final ops = <SequencedWalOp>[];
+    final beginLsn = _state.allocLsn();
+    ops.add(SequencedWalOp(
+      lsn: beginLsn,
+      txnId: txn.txnId,
+      op: const BeginTxn(),
+    ));
+    // InternString catalog ops first so any user op that references a
+    // new keyId / labelId is sequenced after its declaration.
+    for (final op in _pendingInterns) {
+      ops.add(SequencedWalOp(
+        lsn: _state.allocLsn(),
+        txnId: txn.txnId,
+        op: op,
+      ));
+    }
+    for (final op in txn.bufferedOps) {
+      ops.add(SequencedWalOp(
+        lsn: _state.allocLsn(),
+        txnId: txn.txnId,
+        op: op,
+      ));
+    }
+    final commitLsn = _state.allocLsn();
+    ops.add(SequencedWalOp(
+      lsn: commitLsn,
+      txnId: txn.txnId,
+      op: CommitTxn(commitLsn),
+    ));
+    // Durability gate: write to the WAL first. If the sink throws,
+    // state is left unchanged (the txn effectively rolls back). The
+    // sink coalesces the per-op fsync into a single durability ack
+    // per the requested mode (plan §6.7).
+    if (_sink != null) {
+      await _sink.appendBatch(ops, durability: durability);
+    }
+    // InternString ops were applied at intern-time (the string is
+    // already in the local interner). Skip them on apply so we don't
+    // trigger the CorruptionDetected mismatch guard.
+    for (final seq in ops) {
+      if (seq.op is InternString) continue;
+      apply(_state, seq, recovery: false);
+    }
+    _pendingInterns.clear();
+    // After applying, check the overlay merge threshold (plan §14
+    // Phase 2E). Uses the worker isolate when a coordinator is wired
+    // (plan §14 Phase 2 polish — Spike B port), otherwise falls back
+    // to the synchronous main-isolate fold.
+    await _state.maybeMergeOverlayAsync();
+  }
+
+  void _terminate(Transaction txn) {
+    if (!txn.isTerminated) {
+      markTransactionTerminated(txn);
+    }
+  }
+
+  // ----- Bulk write path (plan §14 Phase 2F) -------------------------------
+
+  /// Bulk edge import — bypasses the overlay and rebuilds the CSR
+  /// directly with the new edges folded in. Single WAL transaction
+  /// covers the whole batch. Returns the allocated eids in input
+  /// order.
+  ///
+  /// Use over a `runTransaction` loop when importing > a few thousand
+  /// edges: the overlay path would trip the merge threshold mid-batch
+  /// and pay multiple full-CSR rebuilds; this path pays exactly one.
+  /// Plan §14: "100k bulk-import in < 1s".
+  ///
+  /// **Properties are not supported in this path** — bulk insert is the
+  /// happy path for topology import. Call `runTransaction` for any
+  /// edges that carry properties.
+  Future<List<Eid>> bulkAddEdges(
+    List<BulkEdge> edges, {
+    Durability durability = Durability.group,
+  }) async {
+    if (_state.activeTxnId != null) {
+      throw StateError(
+          'cannot bulkAddEdges while txnId=${_state.activeTxnId} is in '
+          'flight (plan §2.3 single-writer)');
+    }
+    if (edges.isEmpty) return const [];
+    final txnId = _state.allocTxnId();
+    _state.activeTxnId = txnId;
+    try {
+      // 1. Endpoint validation up front — fail fast before allocating.
+      for (final e in edges) {
+        if (!_state.isNodeVisible(e.src)) {
+          throw NotFoundException(
+              'bulkAddEdges: src vid ${e.src.value} does not exist');
+        }
+        if (!_state.isNodeVisible(e.dst)) {
+          throw NotFoundException(
+              'bulkAddEdges: dst vid ${e.dst.value} does not exist');
+        }
+      }
+
+      // 2. Allocate eids + logical ids.
+      final eids = <Eid>[for (var i = 0; i < edges.length; i++) _state.allocEid()];
+      final logicalIds = [
+        for (final e in edges) e.logicalId ?? newUuidV7(),
+      ];
+
+      // 3. Build WAL stream. Catalog interns flush at the front so
+      //    recovery sees them before any op references the new ids.
+      final ops = <SequencedWalOp>[];
+      ops.add(SequencedWalOp(
+        lsn: _state.allocLsn(),
+        txnId: txnId,
+        op: const BeginTxn(),
+      ));
+      for (final intern in _pendingInterns) {
+        ops.add(SequencedWalOp(
+          lsn: _state.allocLsn(),
+          txnId: txnId,
+          op: intern,
+        ));
+      }
+      for (var i = 0; i < edges.length; i++) {
+        final e = edges[i];
+        ops.add(SequencedWalOp(
+          lsn: _state.allocLsn(),
+          txnId: txnId,
+          op: AddEdge(
+            eid: eids[i],
+            logicalId: logicalIds[i],
+            src: e.src,
+            dst: e.dst,
+            typeId: e.typeId,
+            props: const {},
+          ),
+        ));
+      }
+      final commitLsn = _state.allocLsn();
+      ops.add(SequencedWalOp(
+        lsn: commitLsn,
+        txnId: txnId,
+        op: CommitTxn(commitLsn),
+      ));
+
+      // 4. WAL write (durability gate).
+      if (_sink != null) {
+        await _sink.appendBatch(ops, durability: durability);
+      }
+      _pendingInterns.clear();
+
+      // 5. Apply: fold any pending overlay into the CSR first so the
+      //    bulk addition sits on a clean base, then build a temporary
+      //    single-purpose overlay carrying just the bulk edges and
+      //    fold that in.
+      if (!_state.overlay.isEmpty) _state.mergeNow();
+      final tmp = DeltaOverlay();
+      for (var i = 0; i < edges.length; i++) {
+        final e = edges[i];
+        tmp.recordAddEdge(
+          AddedEdge(
+            logicalId: logicalIds[i],
+            src: e.src.value,
+            dst: e.dst.value,
+            typeId: e.typeId,
+          ),
+          eids[i].value,
+        );
+      }
+      final fresh = foldOverlayIntoCsr(base: _state.csr, overlay: tmp);
+      _state.installMergedCsr(fresh);
+
+      return eids;
+    } finally {
+      _state.activeTxnId = null;
+    }
+  }
 
   // ----- Secondary indexes (plan §3.3) -------------------------------------
 

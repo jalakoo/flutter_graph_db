@@ -74,33 +74,25 @@ void main() {
     );
   });
 
-  test('mutation ops throw UnimplementedError until Phase 2', () {
+  test('AddNode routes to MutableGraphState.applyAddNode (Phase 2A)', () {
     final s = _empty();
-    expect(
-      () => apply(
-        s,
-        const SequencedWalOp(lsn: 0, txnId: 1, op: DelNode(Vid(0))),
-        recovery: true,
-      ),
-      throwsA(isA<UnimplementedError>()),
-    );
-    expect(
-      () => apply(
-        s,
-        const SequencedWalOp(
-          lsn: 0,
-          txnId: 1,
-          op: AddNode(
-            vid: Vid(0),
-            logicalId: 'uuid-0',
-            labelIds: [],
-            props: {},
-          ),
+    final lbl = s.strings.internLabel('Person');
+    apply(
+      s,
+      SequencedWalOp(
+        lsn: 0,
+        txnId: 1,
+        op: AddNode(
+          vid: const Vid(0),
+          logicalId: 'uuid-0',
+          labelIds: [lbl],
+          props: const {},
         ),
-        recovery: true,
       ),
-      throwsA(isA<UnimplementedError>()),
+      recovery: true,
     );
+    expect(s.isNodeVisible(const Vid(0)), isTrue);
+    expect(s.effectiveLabelOf(const Vid(0)), lbl);
   });
 
   test('constraint ops throw UnimplementedError (Phase 6)', () {

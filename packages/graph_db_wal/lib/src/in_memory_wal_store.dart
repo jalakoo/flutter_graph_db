@@ -79,8 +79,20 @@ class InMemoryWalStore implements WalStore {
 
   @override
   Future<void> close() async {
+    // Mark inert — further appends / reads on **this** handle throw.
+    // The chunks are kept so the test fixture can simulate "shut down
+    // + reopen" by handing the same instance to a fresh `WalWriter`
+    // after a [reopen] call. Real adapters (`IoWalStore`) close a
+    // kernel handle here; the bytes survive on disk regardless.
     _closed = true;
-    _chunks.clear();
+  }
+
+  /// In-memory only — re-opens a closed store so the same fixture can
+  /// be replayed in a follow-up session. Real disk-backed adapters
+  /// don't need this; you simply construct a new adapter pointing at
+  /// the same path.
+  void reopen() {
+    _closed = false;
   }
 
   void _ensureOpen() {

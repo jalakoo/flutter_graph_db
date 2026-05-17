@@ -41,6 +41,18 @@ class StringInterner {
   String? edgeTypeOf(int id) => _edgeTypes.get(id);
   String? propKeyOf(int id) => _propKeys.get(id);
 
+  /// Returns the existing id for [s] in the label space, or `null`
+  /// if not yet interned. Used by the WAL layer to detect "newly
+  /// interned" so an `InternString` op is emitted exactly once per
+  /// string per kind.
+  int? labelIdOf(String s) => _labels._toId[s];
+
+  /// As [labelIdOf] but for the edge-type space.
+  int? edgeTypeIdOf(String s) => _edgeTypes._toId[s];
+
+  /// As [labelIdOf] but for the property-key space.
+  int? propKeyIdOf(String s) => _propKeys._toId[s];
+
   int get labelCount => _labels.count;
   int get edgeTypeCount => _edgeTypes.count;
   int get propKeyCount => _propKeys.count;
