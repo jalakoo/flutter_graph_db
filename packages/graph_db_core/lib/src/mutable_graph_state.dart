@@ -119,7 +119,10 @@ class MutableGraphState {
         _baseCsrEidToDst = _buildEidToDst(csr);
 
   static Uint32List _buildEidToSrc(Csr csr) {
-    final out = Uint32List(csr.edgeCount);
+    // eids are sparse (deletions leave gaps), so size to max+1, not
+    // edgeCount — `out[eid]` must be a legal write for every eid
+    // present in `csr.edgeIdOut`.
+    final out = Uint32List(_maxEid(csr) + 1);
     for (var v = 0; v < csr.nodeCount; v++) {
       final end = csr.rowPtrOut[v + 1];
       for (var i = csr.rowPtrOut[v]; i < end; i++) {
@@ -130,7 +133,7 @@ class MutableGraphState {
   }
 
   static Uint32List _buildEidToDst(Csr csr) {
-    final out = Uint32List(csr.edgeCount);
+    final out = Uint32List(_maxEid(csr) + 1);
     for (var v = 0; v < csr.nodeCount; v++) {
       final end = csr.rowPtrOut[v + 1];
       for (var i = csr.rowPtrOut[v]; i < end; i++) {
@@ -138,6 +141,15 @@ class MutableGraphState {
       }
     }
     return out;
+  }
+
+  static int _maxEid(Csr csr) {
+    var maxEid = 0;
+    final eids = csr.edgeIdOut;
+    for (var i = 0; i < eids.length; i++) {
+      if (eids[i] > maxEid) maxEid = eids[i];
+    }
+    return maxEid;
   }
 
   /// Next vid the allocator will issue. Read-only; mutate via

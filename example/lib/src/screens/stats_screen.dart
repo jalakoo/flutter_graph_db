@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:graph_db_core/graph_db_core.dart';
 
 import '../db_scope.dart';
+import '../widgets/perf_bench.dart';
 
 /// Whole-graph stats. Demonstrates the cheap, allocation-free range
 /// primitives summed across the full vid space.
@@ -80,6 +81,8 @@ class StatsScreen extends StatelessWidget {
               ),
             ),
           ),
+          const SizedBox(height: 16),
+          const PerfBench(),
         ],
       ),
     );

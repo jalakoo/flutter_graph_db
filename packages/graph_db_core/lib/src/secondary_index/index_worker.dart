@@ -6,8 +6,8 @@
 /// sends to a worker; worker sorts + packs the result and returns;
 /// main installs. The live property store is never detached.
 ///
-/// **Phase 5B+ scope:** supports `int_` (`Int64List` value column)
-/// only. The same pattern extends trivially to `double_` /
+/// **Phase 5B+ scope:** supports `int_` (`Float64List` value column —
+/// web compat per §3.1 / Phase 8) only. The same pattern extends trivially to `double_` /
 /// `stringId` / `bool` (uniform typed-list shape); the `string`
 /// column needs a different transport (strings travel as
 /// `List<String>` across isolates).
@@ -23,7 +23,7 @@ import 'secondary_index.dart';
 class IndexRebuildIntTask {
   final IndexSpec spec;
   final bool hashOverlay;
-  final TransferableTypedData values; // Int64List copy
+  final TransferableTypedData values; // Float64List copy (ints as doubles)
   final TransferableTypedData vids; // Uint32List copy
   IndexRebuildIntTask({
     required this.spec,
@@ -35,13 +35,13 @@ class IndexRebuildIntTask {
   factory IndexRebuildIntTask.copyAndWrap({
     required IndexSpec spec,
     required bool hashOverlay,
-    required Int64List values,
+    required Float64List values,
     required Uint32List vids,
   }) =>
       IndexRebuildIntTask(
         spec: spec,
         hashOverlay: hashOverlay,
-        values: TransferableTypedData.fromList([Int64List.fromList(values)]),
+        values: TransferableTypedData.fromList([Float64List.fromList(values)]),
         vids: TransferableTypedData.fromList([Uint32List.fromList(vids)]),
       );
 }
@@ -71,7 +71,7 @@ void indexWorkerEntry(SendPort handshake) {
 
 IndexRebuildIntResult _doRebuildInt(IndexRebuildIntTask task) {
   final sw = Stopwatch()..start();
-  final values = task.values.materialize().asInt64List();
+  final values = task.values.materialize().asFloat64List();
   final vids = task.vids.materialize().asUint32List();
   final n = values.length;
   // Sort by (value, vid) — match the build factory's ordering so the
@@ -81,7 +81,7 @@ IndexRebuildIntResult _doRebuildInt(IndexRebuildIntTask task) {
       final c = values[a].compareTo(values[b]);
       return c != 0 ? c : vids[a].compareTo(vids[b]);
     });
-  final sortedValues = Int64List(n);
+  final sortedValues = Float64List(n);
   final sortedVids = Uint32List(n);
   for (var i = 0; i < n; i++) {
     sortedValues[i] = values[pairs[i]];
@@ -119,13 +119,13 @@ class IndexRebuildCoordinator {
   /// sorted arrays on the main isolate. The CALLER is responsible
   /// for installing the rebuilt index into the registry — this
   /// method just produces the typed arrays.
-  Future<({Int64List sortedValues, Uint32List sortedVids})> rebuildInt(
+  Future<({Float64List sortedValues, Uint32List sortedVids})> rebuildInt(
     IndexRebuildIntTask task,
   ) async {
     final result = await _worker.send(task);
     lastWorkerUs = result.sortUs;
     return (
-      sortedValues: result.sortedValues.materialize().asInt64List(),
+      sortedValues: result.sortedValues.materialize().asFloat64List(),
       sortedVids: result.sortedVids.materialize().asUint32List(),
     );
   }
@@ -136,14 +136,14 @@ class IndexRebuildCoordinator {
 /// Helper — snapshots an `IntEqualityRangeIndex`-eligible column on
 /// the main isolate (into fresh typed buffers ready for transfer).
 /// Caller passes the result to [IndexRebuildCoordinator.rebuildInt].
-({Int64List values, Uint32List vids}) snapshotIntColumn({
+({Float64List values, Uint32List vids}) snapshotIntColumn({
   required Iterable<(int vid, int value)> pairs,
 }) {
   final list = pairs.toList(growable: false);
-  final values = Int64List(list.length);
+  final values = Float64List(list.length);
   final vids = Uint32List(list.length);
   for (var i = 0; i < list.length; i++) {
-    values[i] = list[i].$2;
+    values[i] = list[i].$2.toDouble();
     vids[i] = list[i].$1;
   }
   return (values: values, vids: vids);
@@ -154,7 +154,7 @@ class IndexRebuildCoordinator {
 /// resulting index is byte-identical to the synchronous build.
 IntEqualityRangeIndex buildIntIndexFromSorted({
   required IndexSpec spec,
-  required Int64List sortedValues,
+  required Float64List sortedValues,
   required Uint32List sortedVids,
   required bool hashOverlay,
 }) {
@@ -162,7 +162,7 @@ IntEqualityRangeIndex buildIntIndexFromSorted({
   if (hashOverlay) {
     final tmp = <int, List<int>>{};
     for (var i = 0; i < sortedValues.length; i++) {
-      (tmp[sortedValues[i]] ??= <int>[]).add(sortedVids[i]);
+      (tmp[sortedValues[i].toInt()] ??= <int>[]).add(sortedVids[i]);
     }
     hash = {for (final e in tmp.entries) e.key: Uint32List.fromList(e.value)};
   }

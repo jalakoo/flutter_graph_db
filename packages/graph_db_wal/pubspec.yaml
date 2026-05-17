@@ -16,6 +16,10 @@ dependencies:
   cbor: ^6.5.1
   xxh3: ^1.2.0
   uuid: ^4.5.0
+  # Phase 8 — IndexedDbWalStore uses `package:web` (Dart's modern
+  # browser bindings) for the IndexedDB API. Web-only adapter; the
+  # rest of the package compiles on every target.
+  web: ^1.0.0
 
 dev_dependencies:
   test: ^1.24.0

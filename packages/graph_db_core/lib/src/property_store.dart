@@ -25,8 +25,17 @@ class _Column {
   final ColumnType type;
   int vidSpace;
 
-  /// `Int64List` / `Float64List` / `Uint8List` (bool) / `Uint32List`
-  /// (interned string id) depending on [type].
+  /// `Float64List` (int — see note below) / `Float64List` /
+  /// `Uint8List` (bool) / `Uint32List` (interned string id) depending
+  /// on [type].
+  ///
+  /// **Why `Float64List` for `int`?** Web (`dart2js` / `dart2wasm`)
+  /// has no `Int64List` — same constraint that drove `Uint32List` for
+  /// CSR topology (§3.1). `Float64List` stores any integer up to
+  /// 2^53 exactly (IEEE 754 mantissa width); realistic node / edge
+  /// counts, ages, timestamps in seconds all fit comfortably. Values
+  /// that exceed 2^53 silently lose precision — flag the column type
+  /// reconsideration if that bites.
   Object values;
 
   /// Length [vidSpace]. `_absent` ⇒ key not set on this vid.
@@ -49,7 +58,7 @@ class _Column {
   static Object _makeValues(ColumnType type, int cap) {
     switch (type) {
       case ColumnType.int_:
-        return Int64List(cap);
+        return Float64List(cap);
       case ColumnType.double_:
         return Float64List(cap);
       case ColumnType.bool_:
@@ -66,8 +75,8 @@ class _Column {
     Object newValues;
     switch (type) {
       case ColumnType.int_:
-        final n = Int64List(newCap);
-        n.setRange(0, capacity, values as Int64List);
+        final n = Float64List(newCap);
+        n.setRange(0, capacity, values as Float64List);
         newValues = n;
       case ColumnType.double_:
         final n = Float64List(newCap);
@@ -194,7 +203,7 @@ class PropertyStore {
     final col = _columnFor(keyId, ColumnType.int_);
     final slot = col.allocSlot(vid);
     col._clearNull(slot);
-    (col.values as Int64List)[slot] = value;
+    (col.values as Float64List)[slot] = value.toDouble();
   }
 
   void setDouble(int vid, int keyId, double value) {
@@ -293,8 +302,9 @@ class PropertyStore {
   }
 
   int getInt(int vid, int keyId) =>
-      (_assertReadable(vid, keyId, ColumnType.int_).values as Int64List)[
-          _columns[keyId]!.vidToSlot[vid]];
+      (_assertReadable(vid, keyId, ColumnType.int_).values as Float64List)[
+              _columns[keyId]!.vidToSlot[vid]]
+          .toInt();
 
   double getDouble(int vid, int keyId) =>
       (_assertReadable(vid, keyId, ColumnType.double_).values as Float64List)[
@@ -341,13 +351,13 @@ class PropertyStore {
   void forEachSetInt(int keyId, void Function(int vid, int value) visit) {
     final col = _assertColumnType(keyId, ColumnType.int_);
     if (col == null) return;
-    final vals = col.values as Int64List;
+    final vals = col.values as Float64List;
     final vidSlot = col.vidToSlot;
     for (var v = 0; v < vidSlot.length; v++) {
       final s = vidSlot[v];
       if (s == _Column._absent) continue;
       if (col.isExplicitNull(s)) continue;
-      visit(v, vals[s]);
+      visit(v, vals[s].toInt());
     }
   }
 
@@ -426,7 +436,7 @@ class PropertyStore {
     if (col.isExplicitNull(slot)) return const PropNull();
     switch (col.type) {
       case ColumnType.int_:
-        return PropInt((col.values as Int64List)[slot]);
+        return PropInt((col.values as Float64List)[slot].toInt());
       case ColumnType.double_:
         return PropDouble((col.values as Float64List)[slot]);
       case ColumnType.bool_:

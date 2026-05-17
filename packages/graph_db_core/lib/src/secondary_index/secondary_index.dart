@@ -48,7 +48,11 @@ abstract class SecondaryIndex {
 // `upperBound` returns the smallest index `i` such that `vs[i] >  q`.
 // Equality range is `[lowerBound(q), upperBound(q))`.
 
-int _lbInt(Int64List vs, int n, int q) {
+// Note: `int_` columns are stored in `Float64List` (web has no
+// `Int64List` — same compat reason as the §3.1 `Uint32List` re-spec).
+// Comparison between a `double` cell and an `int` query is exact for
+// values < 2^53, which covers every realistic integer property.
+int _lbInt(Float64List vs, int n, int q) {
   var lo = 0, hi = n;
   while (lo < hi) {
     final mid = (lo + hi) >> 1;
@@ -61,7 +65,7 @@ int _lbInt(Int64List vs, int n, int q) {
   return lo;
 }
 
-int _ubInt(Int64List vs, int n, int q) {
+int _ubInt(Float64List vs, int n, int q) {
   var lo = 0, hi = n;
   while (lo < hi) {
     final mid = (lo + hi) >> 1;
@@ -164,7 +168,11 @@ class IntEqualityRangeIndex implements SecondaryIndex {
   /// Sorted values, length == [length]. Index `i` pairs with
   /// [sortedVids] index `i`. Non-final: replaced lazily on the first
   /// range query after an incremental mutation (plan §14 Phase 5).
-  Int64List sortedValues;
+  ///
+  /// Stored as `Float64List` (web compat — see file-top note); each
+  /// cell holds an integer ≤ 2^53. Read sites do `.toInt()` at the
+  /// boundary so callers never see a double.
+  Float64List sortedValues;
 
   @override
   Uint32List sortedVids;
@@ -198,7 +206,7 @@ class IntEqualityRangeIndex implements SecondaryIndex {
   /// fresh `.build()`).
   factory IntEqualityRangeIndex.fromSorted({
     required IndexSpec spec,
-    required Int64List sortedValues,
+    required Float64List sortedValues,
     required Uint32List sortedVids,
     required Map<int, Uint32List>? hash,
   }) {
@@ -210,7 +218,7 @@ class IntEqualityRangeIndex implements SecondaryIndex {
     if (incremental) {
       vidToValue = <int, int>{};
       for (var i = 0; i < sortedValues.length; i++) {
-        vidToValue[sortedVids[i]] = sortedValues[i];
+        vidToValue[sortedVids[i]] = sortedValues[i].toInt();
       }
     }
     final effectiveHash = mutHash ??
@@ -230,11 +238,11 @@ class IntEqualityRangeIndex implements SecondaryIndex {
     required bool hashOverlay,
   }) {
     final n = store.columnSetCount(spec.keyId);
-    final values = Int64List(n);
+    final values = Float64List(n);
     final vids = Uint32List(n);
     var idx = 0;
     store.forEachSetInt(spec.keyId, (v, value) {
-      values[idx] = value;
+      values[idx] = value.toDouble();
       vids[idx] = v;
       idx++;
     });
@@ -244,7 +252,7 @@ class IntEqualityRangeIndex implements SecondaryIndex {
         final c = values[a].compareTo(values[b]);
         return c != 0 ? c : vids[a].compareTo(vids[b]);
       });
-    final sortedValues = Int64List(filled);
+    final sortedValues = Float64List(filled);
     final sortedVids = Uint32List(filled);
     for (var i = 0; i < filled; i++) {
       sortedValues[i] = values[pairs[i]];
@@ -258,7 +266,7 @@ class IntEqualityRangeIndex implements SecondaryIndex {
     if (incremental) {
       vidToValue = <int, int>{};
       for (var i = 0; i < filled; i++) {
-        vidToValue[sortedVids[i]] = sortedValues[i];
+        vidToValue[sortedVids[i]] = sortedValues[i].toInt();
       }
     }
     return IntEqualityRangeIndex._(
@@ -271,12 +279,12 @@ class IntEqualityRangeIndex implements SecondaryIndex {
   }
 
   static Map<int, List<int>> _buildIntHashFromSorted(
-    Int64List vs,
+    Float64List vs,
     Uint32List vids,
   ) {
     final out = <int, List<int>>{};
     for (var i = 0; i < vs.length; i++) {
-      (out[vs[i]] ??= <int>[]).add(vids[i]);
+      (out[vs[i].toInt()] ??= <int>[]).add(vids[i]);
     }
     return out;
   }
@@ -386,10 +394,10 @@ class IntEqualityRangeIndex implements SecondaryIndex {
         final c = a.value.compareTo(b.value);
         return c != 0 ? c : a.key.compareTo(b.key);
       });
-    final newValues = Int64List(n);
+    final newValues = Float64List(n);
     final newVids = Uint32List(n);
     for (var i = 0; i < n; i++) {
-      newValues[i] = entries[i].value;
+      newValues[i] = entries[i].value.toDouble();
       newVids[i] = entries[i].key;
     }
     sortedValues = newValues;
