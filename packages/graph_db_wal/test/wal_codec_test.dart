@@ -113,8 +113,24 @@ void expectSeqEqual(SequencedWalOp actual, SequencedWalOp expected) {
       ):
       expect(eid.value, exEid.value);
       expect(keyId, exKey);
-    case (DeclareConstraint(:final name), DeclareConstraint(name: final exName)):
+    case (
+        DeclareConstraint(
+          :final name,
+          :final labelId,
+          :final keyId,
+          :final kind,
+        ),
+        DeclareConstraint(
+          name: final exName,
+          labelId: final exLabel,
+          keyId: final exKey,
+          kind: final exKind,
+        )
+      ):
       expect(name, exName);
+      expect(labelId, exLabel);
+      expect(keyId, exKey);
+      expect(kind, exKind);
     case (DropConstraint(:final name), DropConstraint(name: final exName)):
       expect(name, exName);
     case (
@@ -182,7 +198,16 @@ void main() {
             value: PropBool(true),
           )),
       seq(11, 5, const DelEdgeProp(eid: Eid(7), keyId: 2)),
-      seq(12, 6, const DeclareConstraint(name: 'unique-name')),
+      seq(
+        12,
+        6,
+        const DeclareConstraint(
+          name: 'unique-name',
+          labelId: 0,
+          keyId: 1,
+          kind: ConstraintKind.unique,
+        ),
+      ),
       seq(13, 6, const DropConstraint(name: 'unique-name')),
       seq(14, 7, const InternString(
             intId: 3,

@@ -3,11 +3,13 @@ import 'dart:typed_data';
 
 import 'applicator.dart';
 import 'bulk_edge.dart';
+import 'constraints/constraint_catalog.dart';
 import 'csr.dart';
 import 'durability.dart';
 import 'exceptions.dart';
 import 'identity/uuid_v7.dart';
 import 'ids.dart';
+import 'isolation.dart';
 import 'merge/merge_fold.dart';
 import 'mutable_graph_state.dart';
 import 'overlay/delta_overlay.dart';
@@ -354,6 +356,48 @@ class GraphDb {
       markTransactionTerminated(txn);
     }
   }
+
+  // ----- Phase 6A: observable LSN ------------------------------------------
+
+  /// LSN of the most recently applied op. Foundation for snapshot
+  /// isolation (plan §14 Phase 6A) — readers can capture this and
+  /// later compare to know whether the engine has advanced. Full
+  /// pinning + MVCC enforcement is Phase 6B.
+  int get currentLsn => _state.nextLsn - 1;
+
+  /// Current next-LSN — the LSN the next committed op will receive.
+  int get nextLsn => _state.nextLsn;
+
+  /// Active pins on this engine. Tests + tooling use this; v1
+  /// doesn't enforce isolation against the pin set, but future
+  /// MVCC (Phase 6B+) uses it to gate version retention.
+  final Set<LsnPin> _activePins = {};
+  int get activePinCount => _activePins.length;
+
+  /// Captures the current LSN as a [LsnPin] — see [LsnPin] /
+  /// [IsolationLevel] for v1 semantics. Release the pin via
+  /// `pin.release()` when done so future MVCC enforcement doesn't
+  /// retain old versions on your behalf.
+  LsnPin pinLsn({
+    IsolationLevel isolation = IsolationLevel.snapshot,
+  }) {
+    late LsnPin pin;
+    pin = LsnPin(
+      lsn: currentLsn,
+      isolation: isolation,
+      onRelease: () => _activePins.remove(pin),
+    );
+    _activePins.add(pin);
+    return pin;
+  }
+
+  // ----- Phase 6C: constraint catalog --------------------------------------
+
+  /// Read-only handle to the engine's constraint catalog. Application
+  /// code reads this to introspect active constraints; declare /
+  /// drop go through `runTransaction` so the WAL records them and
+  /// recovery rebuilds the catalog.
+  ConstraintCatalog get constraints => _state.constraints;
 
   // ----- Bulk write path (plan §14 Phase 2F) -------------------------------
 

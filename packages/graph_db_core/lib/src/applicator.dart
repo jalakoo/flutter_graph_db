@@ -88,12 +88,22 @@ void apply(
     case DelEdgeProp(:final eid, :final keyId):
       state.applyDelEdgeProp(eid, keyId);
       return;
-    case DeclareConstraint():
-      throw UnimplementedError(
-          'DeclareConstraint applies in Phase 6 (constraint catalog).');
-    case DropConstraint():
-      throw UnimplementedError(
-          'DropConstraint applies in Phase 6 (constraint catalog).');
+    case DeclareConstraint(
+        :final name,
+        :final labelId,
+        :final keyId,
+        :final kind,
+      ):
+      state.applyDeclareConstraint(
+        name: name,
+        labelId: labelId,
+        keyId: keyId,
+        kind: kind,
+      );
+      return;
+    case DropConstraint(:final name):
+      state.applyDropConstraint(name);
+      return;
   }
 }
 

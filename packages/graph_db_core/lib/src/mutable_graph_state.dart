@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'constraints/constraint.dart';
+import 'constraints/constraint_catalog.dart';
 import 'csr.dart';
 import 'exceptions.dart';
 import 'ids.dart';
@@ -14,6 +16,7 @@ import 'secondary_index/index_spec.dart';
 import 'secondary_index/index_worker.dart';
 import 'secondary_index/secondary_index.dart';
 import 'string_interner.dart';
+import 'wal_op.dart' show ConstraintKind;
 
 /// The composed in-memory state the engine reads from (plan §2.1).
 ///
@@ -71,6 +74,12 @@ class MutableGraphState {
   /// today; other types fall back to main-isolate rebuild). When
   /// `null`, the same async call runs the rebuild inline.
   IndexRebuildCoordinator? indexRebuildCoordinator;
+
+  /// Constraint catalog (plan §4 / §14 Phase 6C). Rebuilt from the
+  /// WAL on recovery via the `DeclareConstraint` / `DropConstraint`
+  /// ops. Application code reads this to introspect active
+  /// constraints; mutations enforce against it automatically.
+  final ConstraintCatalog constraints = ConstraintCatalog();
 
   int _nextVid;
   int _nextEid;
@@ -425,6 +434,12 @@ class MutableGraphState {
           'AddNode given ${labelIds.length} labels; v1 is single-label '
           '(plan §6.4 multi-label is Phase 1.1)');
     }
+    // Existence-constraint pre-check (plan §14 Phase 6C) — fail
+    // before any property writes so partial state isn't left behind.
+    constraints.enforceExistenceOnAddNode(
+      labelId: labelIds.first,
+      props: props,
+    );
     overlay.recordAddNode(
       vid.value,
       AddedNode(logicalId: logicalId, labelIds: List.of(labelIds)),
@@ -515,6 +530,11 @@ class MutableGraphState {
 
   /// Applies a `DelNodeProp` WAL op.
   void applyDelNodeProp(Vid vid, int keyId) {
+    constraints.enforceExistenceOnDelNodeProp(
+      vid: vid.value,
+      keyId: keyId,
+      labelOf: (v) => effectiveLabelOf(Vid(v)),
+    );
     nodeProps.remove(vid.value, keyId);
     _maintainNodeIndexes(vid.value, keyId);
   }
@@ -996,6 +1016,122 @@ class MutableGraphState {
       createNodePropertyIndex(spec);
     }
   }
+
+  // ----- Constraint catalog mutation hooks (plan §14 Phase 6C) -------------
+
+  /// Registers a constraint via the catalog. Called by the
+  /// applicator on `DeclareConstraint` and by the public
+  /// `GraphDb.declareConstraint`. **Validates existing data** —
+  /// throws [ConstraintViolation] if any current vid breaks the
+  /// proposed constraint.
+  void applyDeclareConstraint({
+    required String name,
+    required int labelId,
+    required int keyId,
+    required ConstraintKind kind,
+  }) {
+    final ConstraintSpec spec = switch (kind) {
+      ConstraintKind.unique => UniqueConstraint(
+          name: name, labelId: labelId, keyId: keyId,
+        ),
+      ConstraintKind.existence => ExistenceConstraint(
+          name: name, labelId: labelId, keyId: keyId,
+        ),
+    };
+    _validateConstraintAgainstExistingData(spec);
+    constraints.declare(spec);
+    // Auto-create an underlying unique index so per-mutation
+    // enforcement comes for free via the Phase 5 unique path.
+    // v1 limitation: the index is global across all labels (doesn't
+    // honour [spec.labelId]) — a property uniqueness scoped to one
+    // label is enforced only at declare-time validation, not on
+    // post-declare mutations that touch other labels. Polish item.
+    if (spec is UniqueConstraint) {
+      final indexName = '__uq_${spec.name}';
+      // Skip if the column hasn't been declared yet — the constraint
+      // still registers and re-checks happen on future mutations.
+      // (Polish: hook column-declare to lazily create the index.)
+      if (getNodeIndex(indexName) == null &&
+          nodeProps.columnType(spec.keyId) != null) {
+        createNodePropertyIndex(IndexSpec(
+          name: indexName,
+          keyId: spec.keyId,
+          kind: const EqualityRange(unique: true, incremental: true),
+        ));
+      }
+    }
+  }
+
+  /// Drops a constraint by name. Idempotent.
+  void applyDropConstraint(String name) {
+    constraints.drop(name);
+  }
+
+  void _validateConstraintAgainstExistingData(ConstraintSpec spec) {
+    if (spec is UniqueConstraint) {
+      final seen = <Object, int>{};
+      _forEachVidWithLabel(spec.labelId, (vid) {
+        if (!nodeProps.has(vid, spec.keyId)) return;
+        final value = nodeProps.getBoxed(vid, spec.keyId);
+        if (value == null || value is PropNull) return;
+        final raw = _propRaw(value);
+        final prior = seen[raw];
+        if (prior != null) {
+          throw ConstraintViolation(
+            'unique constraint "${spec.name}" violated by existing data: '
+            'value already on vid $prior',
+          );
+        }
+        seen[raw] = vid;
+      });
+    } else if (spec is ExistenceConstraint) {
+      _forEachVidWithLabel(spec.labelId, (vid) {
+        if (!nodeProps.has(vid, spec.keyId)) {
+          throw ConstraintViolation(
+            'existence constraint "${spec.name}" violated by existing data: '
+            'vid $vid has no value for key ${spec.keyId}',
+          );
+        }
+      });
+    }
+  }
+
+  void _forEachVidWithLabel(int labelId, void Function(int) visit) {
+    final base = _csr.labelIndex[labelId];
+    if (base != null) {
+      for (final v in base) {
+        if (overlay.deletedNodes.contains(v)) continue;
+        final ov = overlay.labelOverride[v];
+        if (ov != null && ov != labelId) continue;
+        visit(v);
+      }
+    }
+    for (final entry in overlay.addedNodes.entries) {
+      if (overlay.deletedNodes.contains(entry.key)) continue;
+      if (entry.value.labelIds.isNotEmpty &&
+          entry.value.labelIds.first == labelId) {
+        visit(entry.key);
+      }
+    }
+    for (final entry in overlay.labelOverride.entries) {
+      if (entry.value != labelId) continue;
+      if (overlay.deletedNodes.contains(entry.key)) continue;
+      if (entry.key < _csr.nodeCount &&
+          _csr.labelOf[entry.key] == labelId) {
+        continue;
+      }
+      visit(entry.key);
+    }
+  }
+
+  Object _propRaw(PropValue v) => switch (v) {
+        PropInt(:final value) => value,
+        PropDouble(:final value) => value,
+        PropBool(:final value) => value,
+        PropString(:final value) => value,
+        PropNull() => '__null__',
+        PropList() || PropMap() => v.toString(),
+      };
 
   /// Returns the first vid carrying [value] in [idx], or `null` if
   /// the value isn't indexed. O(log n) for sorted-array indexes

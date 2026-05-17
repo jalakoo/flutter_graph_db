@@ -93,11 +93,37 @@ Future<void> recoverInto(
 /// Convenience — recovers + wires a [WalWriter] sink, returning a
 /// ready-to-use [GraphDb]. The single entry-point most callers want
 /// for WAL-backed durability (plan §14 Phase 2C).
+///
+/// [snapshot] (plan §14 Phase 6D) — optional snapshot bytes to load
+/// **before** WAL replay. When provided, the state is reconstructed
+/// from the snapshot and only WAL ops past the snapshot's LSN are
+/// replayed. The snapshot's `nextLsn` field tells recovery where to
+/// resume (callers are responsible for ensuring the WAL contents
+/// match the snapshot — typically by having taken the snapshot +
+/// truncated the WAL together; see [compactToCurrentTip]).
 Future<GraphDb> openWalBackedGraphDb({
   required WalStore store,
   WalCodec codec = const WalCodec(),
+  Uint8List? snapshot,
 }) async {
-  final state = await recoverGraphState(store: store, codec: codec);
+  final state = snapshot != null
+      ? decodeSnapshot(snapshot)
+      : await recoverGraphState(store: store, codec: codec);
+  if (snapshot != null) {
+    // Replay any WAL ops the snapshot doesn't already cover.
+    await recoverInto(state, store: store, codec: codec);
+  }
   final writer = WalWriter(store, codec: codec);
   return GraphDb.fromState(state, sink: writer);
+}
+
+/// Truncates the WAL up to its current length (plan §14 Phase 6E).
+/// Call **after** persisting a snapshot of the same state — the
+/// snapshot owns the recovery contract for everything the truncate
+/// just dropped.
+///
+/// Returns the byte offset retained (segment-aligned; may be less
+/// than requested per Phase 2D's truncate semantics).
+Future<int> compactToCurrentTip({required WalStore store}) async {
+  return store.truncate(upToOffset: store.length);
 }

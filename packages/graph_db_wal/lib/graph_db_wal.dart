@@ -18,7 +18,11 @@ library;
 export 'src/codec/wal_codec.dart' show WalCodec, WalDecoder;
 export 'src/in_memory_wal_store.dart' show InMemoryWalStore;
 export 'src/recovery.dart'
-    show openWalBackedGraphDb, recoverGraphState, recoverInto;
+    show
+        compactToCurrentTip,
+        openWalBackedGraphDb,
+        recoverGraphState,
+        recoverInto;
 export 'src/segmented_in_memory_wal_store.dart'
     show SegmentedInMemoryWalStore, kDefaultWalSegmentBytes;
 export 'src/wal_reader.dart' show WalReader;

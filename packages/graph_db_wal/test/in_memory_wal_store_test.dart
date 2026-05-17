@@ -54,11 +54,10 @@ void main() {
       // Truncate exactly at first chunk's end → first chunk gone.
       expect(await store.truncate(upToOffset: 3), 3);
       expect(await _readAll(store, fromOffset: 3), _bytes([4, 5]));
-      // Reading before the truncated point throws.
-      expect(
-        () => _readAll(store, fromOffset: 0),
-        throwsA(isA<StateError>()),
-      );
+      // Reading before the truncated point silently starts at the
+      // truncate boundary (matches a file-backed adapter's behaviour
+      // after a truncate — the kept tail is what's readable).
+      expect(await _readAll(store, fromOffset: 0), _bytes([4, 5]));
     });
 
     test('sync is a no-op on RAM-only adapter', () async {

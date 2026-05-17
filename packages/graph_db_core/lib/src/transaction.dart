@@ -18,6 +18,7 @@
 /// `runTransaction` while a txn is in flight throws.
 library;
 
+import 'constraints/constraint.dart';
 import 'identity/uuid_v7.dart';
 import 'ids.dart';
 import 'mutable_graph_state.dart';
@@ -173,6 +174,32 @@ class Transaction {
   void delEdgeProp(Eid eid, int keyId) {
     _check();
     _buffer.add(DelEdgeProp(eid: eid, keyId: keyId));
+  }
+
+  // ----- constraint catalog (plan §14 Phase 6C) -----
+
+  /// Records a `DeclareConstraint` WAL op (plan §4 / §14 Phase 6C).
+  /// The catalog enforcement (validation against existing data,
+  /// auto-create of the underlying unique index) runs at apply-time;
+  /// if validation fails, the whole txn rolls back.
+  void declareConstraint(ConstraintSpec spec) {
+    _check();
+    final kind = switch (spec) {
+      UniqueConstraint() => ConstraintKind.unique,
+      ExistenceConstraint() => ConstraintKind.existence,
+    };
+    _buffer.add(DeclareConstraint(
+      name: spec.name,
+      labelId: spec.labelId,
+      keyId: spec.keyId,
+      kind: kind,
+    ));
+  }
+
+  /// Drops the constraint named [name] (idempotent — see plan §6.4).
+  void dropConstraint(String name) {
+    _check();
+    _buffer.add(DropConstraint(name: name));
   }
 
   void _markTerminated() {

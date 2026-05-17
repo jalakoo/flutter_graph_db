@@ -170,11 +170,20 @@ class WalCodec {
           'eid': eid.value,
           'keyId': keyId,
         },
-      DeclareConstraint(:final name) => {
+      DeclareConstraint(
+        :final name,
+        :final labelId,
+        :final keyId,
+        :final kind,
+      ) =>
+        {
           'op': 'DeclareConstraint',
           'lsn': seq.lsn,
           'txnId': seq.txnId,
           'name': name,
+          'labelId': labelId,
+          'keyId': keyId,
+          'kind': kind.name,
         },
       DropConstraint(:final name) => {
           'op': 'DropConstraint',
@@ -245,7 +254,13 @@ class WalCodec {
           eid: Eid(m['eid'] as int),
           keyId: m['keyId'] as int,
         ),
-      'DeclareConstraint' => DeclareConstraint(name: m['name'] as String),
+      'DeclareConstraint' => DeclareConstraint(
+          name: m['name'] as String,
+          labelId: m['labelId'] as int,
+          keyId: m['keyId'] as int,
+          kind: ConstraintKind.values
+              .firstWhere((k) => k.name == m['kind'] as String),
+        ),
       'DropConstraint' => DropConstraint(name: m['name'] as String),
       'InternString' => InternString(
           intId: m['intId'] as int,

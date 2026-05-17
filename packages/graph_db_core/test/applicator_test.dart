@@ -95,19 +95,25 @@ void main() {
     expect(s.effectiveLabelOf(const Vid(0)), lbl);
   });
 
-  test('constraint ops throw UnimplementedError (Phase 6)', () {
+  test('DeclareConstraint registers in the catalog (Phase 6C)', () {
     final s = _empty();
-    expect(
-      () => apply(
-        s,
-        const SequencedWalOp(
-          lsn: 0,
-          txnId: 1,
-          op: DeclareConstraint(name: 'foo'),
+    final lbl = s.strings.internLabel('Person');
+    final key = s.strings.internPropKey('email');
+    apply(
+      s,
+      SequencedWalOp(
+        lsn: 0,
+        txnId: 1,
+        op: DeclareConstraint(
+          name: 'person_email_uq',
+          labelId: lbl,
+          keyId: key,
+          kind: ConstraintKind.unique,
         ),
-        recovery: true,
       ),
-      throwsA(isA<UnimplementedError>()),
+      recovery: true,
     );
+    expect(s.constraints.length, 1);
+    expect(s.constraints.get('person_email_uq'), isA<UniqueConstraint>());
   });
 }

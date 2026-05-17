@@ -137,12 +137,25 @@ final class DelEdgeProp extends WalOp {
   const DelEdgeProp({required this.eid, required this.keyId});
 }
 
-/// Declares a constraint (uniqueness on `(label, propKey)`, etc — plan
-/// §4 / §6.4). The concrete spec shape lands with the Phase-6
-/// constraint catalog.
+/// Constraint kind tag carried by [DeclareConstraint] (plan §4 / §14
+/// Phase 6C). v1 ships two kinds; future kinds (FK-like edge type,
+/// composite uniques, range constraints) extend the enum.
+enum ConstraintKind { unique, existence }
+
+/// Declares a constraint (plan §4 / §14 Phase 6C). v1 carries the
+/// full spec — name + label + key + kind — so recovery rebuilds the
+/// catalog without an out-of-band channel.
 final class DeclareConstraint extends WalOp {
   final String name;
-  const DeclareConstraint({required this.name});
+  final int labelId;
+  final int keyId;
+  final ConstraintKind kind;
+  const DeclareConstraint({
+    required this.name,
+    required this.labelId,
+    required this.keyId,
+    required this.kind,
+  });
 }
 
 /// Drops a previously declared constraint by name.

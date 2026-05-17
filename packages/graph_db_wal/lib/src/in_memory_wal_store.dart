@@ -32,11 +32,10 @@ class InMemoryWalStore implements WalStore {
   @override
   Stream<Uint8List> read({int fromOffset = 0}) async* {
     _ensureOpen();
-    if (fromOffset < _truncatedBefore) {
-      throw StateError(
-          'cannot read from offset $fromOffset; truncated before '
-          '$_truncatedBefore');
-    }
+    // Asking for bytes < the truncate boundary is benign — silently
+    // advance to the boundary. Matches what a file-backed adapter
+    // does after a truncate (the file starts at the kept tail).
+    if (fromOffset < _truncatedBefore) fromOffset = _truncatedBefore;
     var pos = _truncatedBefore;
     for (final chunk in _chunks) {
       final chunkEnd = pos + chunk.length;
