@@ -1,7 +1,9 @@
-/// RESP-over-Dart `RemoteGraphClient` adapter for FalkorDB
-/// (plan §9.1).
-///
-/// **Skeleton.** Implementation lands in Phase 4 per plan §14. RESP
-/// client choice is deferred to the Phase-4 audit; the §13
-/// dependencies table flags the contingency.
+/// FalkorDB adapter — RESP2 over `dart:io` `Socket` /
+/// `SecureSocket` implementing [`RemoteGraphClient`] (plan §9 /
+/// §14 Phase 4D–4E).
 library;
+
+export 'src/falkor_client.dart' show FalkorClient, FalkorClientConfig;
+export 'src/resp/resp.dart'
+    show RespDecoder, RespError, RespException, encodeCommand;
+export 'src/resp/transport.dart' show RespTransport, SocketRespTransport;
