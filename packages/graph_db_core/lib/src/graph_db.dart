@@ -5,6 +5,9 @@ import 'ids.dart';
 import 'mutable_graph_state.dart';
 import 'prop_value.dart';
 import 'property_store.dart';
+import 'secondary_index/index_size_event.dart';
+import 'secondary_index/index_spec.dart';
+import 'secondary_index/secondary_index.dart';
 
 /// Public facade over the engine (plan §7.1).
 ///
@@ -145,4 +148,39 @@ class GraphDb {
       _state.nodeProps.getBoxed(vid.value, keyId);
   PropValue? getEdgeProp(Eid eid, int keyId) =>
       _state.edgeProps.getBoxed(eid.value, keyId);
+
+  // ----- Secondary indexes (plan §3.3) -------------------------------------
+
+  /// Soft-budget size-event hook (plan §3.3). Default unset = silent.
+  /// Wire a logger or a test assertion sink here to be notified when
+  /// a freshly-built index crosses the [kIndexSizeWarnThreshold]
+  /// ratio of [Csr.sizeBytes]. Fired once per `createIndex()`.
+  IndexSizeListener? onIndexSizeEvent;
+
+  /// Builds a node-property index from the current state. Fires
+  /// [onIndexSizeEvent] if the new index is at or above the soft
+  /// budget. Phase 1 is read-only — the index reflects the loaded
+  /// fixture and does not update with mutations (Phase 5 wires
+  /// incremental update).
+  SecondaryIndex createNodePropertyIndex(IndexSpec spec) =>
+      _state.createNodePropertyIndex(spec, onSizeEvent: onIndexSizeEvent);
+
+  /// Builds an edge-property index from the current state. See
+  /// [createNodePropertyIndex] for semantics.
+  SecondaryIndex createEdgePropertyIndex(IndexSpec spec) =>
+      _state.createEdgePropertyIndex(spec, onSizeEvent: onIndexSizeEvent);
+
+  /// Looks up a registered node-property index by name.
+  SecondaryIndex? getNodeIndex(String name) => _state.getNodeIndex(name);
+
+  /// Looks up a registered edge-property index by name.
+  SecondaryIndex? getEdgeIndex(String name) => _state.getEdgeIndex(name);
+
+  /// Removes a node-property index from the registry. Returns the
+  /// removed index, or `null` if no such index existed.
+  SecondaryIndex? dropNodeIndex(String name) => _state.dropNodeIndex(name);
+
+  /// Removes an edge-property index from the registry. Returns the
+  /// removed index, or `null` if no such index existed.
+  SecondaryIndex? dropEdgeIndex(String name) => _state.dropEdgeIndex(name);
 }

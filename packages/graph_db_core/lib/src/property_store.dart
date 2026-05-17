@@ -300,6 +300,93 @@ class PropertyStore {
     return col;
   }
 
+  // -------------------------------------------------------- bulk scans
+  //
+  // Used by the secondary-index builder (plan §3.3). Each scan visits
+  // every vid where the column is set AND **not** explicit-null. v1
+  // indexes do not include a NULL bucket; standard SQL-ish convention.
+  // Allocation-free — typed value handed straight to [visit].
+
+  int columnSetCount(int keyId) => _columns[keyId]?.setCount ?? 0;
+
+  void forEachSetInt(int keyId, void Function(int vid, int value) visit) {
+    final col = _assertColumnType(keyId, ColumnType.int_);
+    if (col == null) return;
+    final vals = col.values as Int64List;
+    final vidSlot = col.vidToSlot;
+    for (var v = 0; v < vidSlot.length; v++) {
+      final s = vidSlot[v];
+      if (s == _Column._absent) continue;
+      if (col.isExplicitNull(s)) continue;
+      visit(v, vals[s]);
+    }
+  }
+
+  void forEachSetDouble(int keyId, void Function(int vid, double value) visit) {
+    final col = _assertColumnType(keyId, ColumnType.double_);
+    if (col == null) return;
+    final vals = col.values as Float64List;
+    final vidSlot = col.vidToSlot;
+    for (var v = 0; v < vidSlot.length; v++) {
+      final s = vidSlot[v];
+      if (s == _Column._absent) continue;
+      if (col.isExplicitNull(s)) continue;
+      visit(v, vals[s]);
+    }
+  }
+
+  void forEachSetBool(int keyId, void Function(int vid, bool value) visit) {
+    final col = _assertColumnType(keyId, ColumnType.bool_);
+    if (col == null) return;
+    final vals = col.values as Uint8List;
+    final vidSlot = col.vidToSlot;
+    for (var v = 0; v < vidSlot.length; v++) {
+      final s = vidSlot[v];
+      if (s == _Column._absent) continue;
+      if (col.isExplicitNull(s)) continue;
+      visit(v, vals[s] != 0);
+    }
+  }
+
+  void forEachSetString(int keyId, void Function(int vid, String value) visit) {
+    final col = _assertColumnType(keyId, ColumnType.string);
+    if (col == null) return;
+    final vals = col.values as List<String?>;
+    final vidSlot = col.vidToSlot;
+    for (var v = 0; v < vidSlot.length; v++) {
+      final s = vidSlot[v];
+      if (s == _Column._absent) continue;
+      if (col.isExplicitNull(s)) continue;
+      visit(v, vals[s]!);
+    }
+  }
+
+  void forEachSetStringId(
+    int keyId,
+    void Function(int vid, int stringId) visit,
+  ) {
+    final col = _assertColumnType(keyId, ColumnType.stringId);
+    if (col == null) return;
+    final vals = col.values as Uint32List;
+    final vidSlot = col.vidToSlot;
+    for (var v = 0; v < vidSlot.length; v++) {
+      final s = vidSlot[v];
+      if (s == _Column._absent) continue;
+      if (col.isExplicitNull(s)) continue;
+      visit(v, vals[s]);
+    }
+  }
+
+  _Column? _assertColumnType(int keyId, ColumnType expected) {
+    final col = _columns[keyId];
+    if (col == null) return null;
+    if (col.type != expected) {
+      throw ConstraintViolation(
+          'column $keyId is ${col.type}, not $expected');
+    }
+    return col;
+  }
+
   /// Boundary read — constructs and returns a [PropValue]. Allocates;
   /// use the typed primitive accessors on the hot path.
   PropValue? getBoxed(int vid, int keyId) {

@@ -22,5 +22,8 @@ export 'src/mutable_graph_state.dart';
 export 'src/platform.dart';
 export 'src/prop_value.dart';
 export 'src/property_store.dart';
+export 'src/secondary_index/index_size_event.dart';
+export 'src/secondary_index/index_spec.dart';
+export 'src/secondary_index/secondary_index.dart';
 export 'src/string_interner.dart';
 export 'src/wal_op.dart';

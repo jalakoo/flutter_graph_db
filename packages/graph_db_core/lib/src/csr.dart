@@ -190,4 +190,28 @@ class Csr {
 
   /// In-degree of [vid].
   int inDegree(int vid) => rowPtrIn[vid + 1] - rowPtrIn[vid];
+
+  /// Total bytes occupied by the topology arrays (plan §3.3 size budget).
+  ///
+  /// Counts `rowPtr` + `colIdx` + `edgeId` + `edgeType` (both directions)
+  /// + `labelOf` + the per-label `labelIndex` arrays. Each `Uint32List`
+  /// slot is 4 bytes. Used by the secondary-index registry to compute
+  /// the 25-percent soft warning ratio.
+  int get sizeBytes {
+    var labelIndexSlots = 0;
+    for (final arr in labelIndex.values) {
+      labelIndexSlots += arr.length;
+    }
+    return 4 *
+        (rowPtrOut.length +
+            colIdxOut.length +
+            edgeIdOut.length +
+            edgeTypeOut.length +
+            rowPtrIn.length +
+            colIdxIn.length +
+            edgeIdIn.length +
+            edgeTypeIn.length +
+            labelOf.length +
+            labelIndexSlots);
+  }
 }

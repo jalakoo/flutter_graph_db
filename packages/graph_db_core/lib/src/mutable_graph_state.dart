@@ -1,8 +1,12 @@
 import 'dart:typed_data';
 
 import 'csr.dart';
+import 'exceptions.dart';
 import 'ids.dart';
 import 'property_store.dart';
+import 'secondary_index/index_size_event.dart';
+import 'secondary_index/index_spec.dart';
+import 'secondary_index/secondary_index.dart';
 import 'string_interner.dart';
 
 /// The composed in-memory state the engine reads from (plan §2.1).
@@ -155,4 +159,128 @@ class MutableGraphState {
       edgeProps.getString(eid.value, keyId);
   int getEdgeStringIdProp(Eid eid, int keyId) =>
       edgeProps.getStringId(eid.value, keyId);
+
+  // ----- Secondary index registry (plan §3.3) ------------------------------
+  //
+  // Built once from the current column state — Phase 1 is read-only.
+  // Phase 5 will revisit incremental update + the deferred build via the
+  // §2.3 worker hand-off.
+
+  final Map<String, SecondaryIndex> _nodeIndexes = {};
+  final Map<String, SecondaryIndex> _edgeIndexes = {};
+
+  /// Read-only view of the registered node-property indexes.
+  Map<String, SecondaryIndex> get nodeIndexes =>
+      Map.unmodifiable(_nodeIndexes);
+
+  /// Read-only view of the registered edge-property indexes.
+  Map<String, SecondaryIndex> get edgeIndexes =>
+      Map.unmodifiable(_edgeIndexes);
+
+  /// Builds a node-property index from the current [nodeProps] column.
+  ///
+  /// Fires [onSizeEvent] **once** if the freshly-built index size is at
+  /// or above [kIndexSizeWarnThreshold] of [csr.sizeBytes] (plan §3.3
+  /// soft budget). [onSizeEvent] is optional; pass `null` (default) to
+  /// silently build.
+  ///
+  /// Throws [ConstraintViolation] if an index named [IndexSpec.name]
+  /// already exists, or if the column type isn't yet declared.
+  SecondaryIndex createNodePropertyIndex(
+    IndexSpec spec, {
+    IndexSizeListener? onSizeEvent,
+  }) =>
+      _createIndex(_nodeIndexes, nodeProps, spec, onSizeEvent);
+
+  /// Builds an edge-property index from the current [edgeProps] column.
+  /// See [createNodePropertyIndex] for semantics.
+  SecondaryIndex createEdgePropertyIndex(
+    IndexSpec spec, {
+    IndexSizeListener? onSizeEvent,
+  }) =>
+      _createIndex(_edgeIndexes, edgeProps, spec, onSizeEvent);
+
+  SecondaryIndex _createIndex(
+    Map<String, SecondaryIndex> registry,
+    PropertyStore store,
+    IndexSpec spec,
+    IndexSizeListener? onSizeEvent,
+  ) {
+    if (registry.containsKey(spec.name)) {
+      throw ConstraintViolation('index "${spec.name}" already exists');
+    }
+    final colType = store.columnType(spec.keyId);
+    if (colType == null) {
+      throw ConstraintViolation(
+          'cannot build index "${spec.name}": no column declared for '
+          'keyId ${spec.keyId}');
+    }
+
+    final SecondaryIndex idx;
+    switch (spec.kind) {
+      case EqualityRange(:final hashOverlay):
+        switch (colType) {
+          case ColumnType.int_:
+            idx = IntEqualityRangeIndex.build(
+              spec: spec,
+              store: store,
+              hashOverlay: hashOverlay,
+            );
+          case ColumnType.double_:
+            idx = DoubleEqualityRangeIndex.build(
+              spec: spec,
+              store: store,
+              hashOverlay: hashOverlay,
+            );
+          case ColumnType.stringId:
+            idx = StringIdEqualityRangeIndex.build(
+              spec: spec,
+              store: store,
+              hashOverlay: hashOverlay,
+            );
+          case ColumnType.string:
+            idx = StringEqualityRangeIndex.build(
+              spec: spec,
+              store: store,
+              hashOverlay: hashOverlay,
+            );
+          case ColumnType.bool_:
+            idx = BoolEqualityRangeIndex.build(
+              spec: spec,
+              store: store,
+            );
+        }
+    }
+
+    registry[spec.name] = idx;
+
+    if (onSizeEvent != null) {
+      final csrBytes = csr.sizeBytes;
+      final ratio = csrBytes == 0 ? 0.0 : idx.sizeBytes / csrBytes;
+      if (ratio >= kIndexSizeWarnThreshold) {
+        onSizeEvent(IndexSizeEvent(
+          spec: spec,
+          indexBytes: idx.sizeBytes,
+          csrBytes: csrBytes,
+          ratio: ratio,
+          severity: IndexSizeSeverity.warn,
+        ));
+      }
+    }
+    return idx;
+  }
+
+  /// Looks up a registered node-property index by name.
+  SecondaryIndex? getNodeIndex(String name) => _nodeIndexes[name];
+
+  /// Looks up a registered edge-property index by name.
+  SecondaryIndex? getEdgeIndex(String name) => _edgeIndexes[name];
+
+  /// Removes a node-property index from the registry. Returns the
+  /// removed index, or `null` if no such index existed.
+  SecondaryIndex? dropNodeIndex(String name) => _nodeIndexes.remove(name);
+
+  /// Removes an edge-property index from the registry. Returns the
+  /// removed index, or `null` if no such index existed.
+  SecondaryIndex? dropEdgeIndex(String name) => _edgeIndexes.remove(name);
 }
