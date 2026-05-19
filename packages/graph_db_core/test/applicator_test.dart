@@ -93,7 +93,7 @@ void main() {
       recovery: true,
     );
     expect(s.isNodeVisible(const Vid(0)), isTrue);
-    expect(s.effectiveLabelOf(const Vid(0)), lbl);
+    expect(s.hasLabelEffective(const Vid(0), lbl), isTrue);
   });
 
   test('DeclareConstraint registers in the catalog (Phase 6C)', () {

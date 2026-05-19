@@ -64,12 +64,12 @@ void main() {
     expect(db.propKeyName(sg.nameKey), 'name');
   });
 
-  test('labelOf returns the right label per node', () {
+  test('hasLabel returns the right label per node', () {
     for (final p in sg.people) {
-      expect(db.labelOf(p), sg.personLabel);
+      expect(db.hasLabel(p, sg.personLabel), isTrue);
     }
     for (final c in sg.companies) {
-      expect(db.labelOf(c), sg.companyLabel);
+      expect(db.hasLabel(c, sg.companyLabel), isTrue);
     }
   });
 }

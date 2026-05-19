@@ -41,17 +41,57 @@ Csr foldOverlayIntoCsr({
     if (vid + 1 > newNodeCount) newNodeCount = vid + 1;
   }
 
-  // ----- 2. labelOf ---------------------------------------------------------
+  // ----- 2. Ragged labels (labelRowPtr + labels) ---------------------------
+  //
+  // Three sources, in priority order: labelOverride (full new set for
+  // a pre-existing vid) > addedNodes (overlay-born; authoritative for
+  // their vids) > base CSR ragged slice. Build by two passes: count
+  // each vid's label width into rowPtr, prefix-sum, then fill.
+  final newLabelRowPtr = Uint32List(newNodeCount + 1);
+  for (var v = 0; v < newNodeCount; v++) {
+    final ov = overlay.labelOverride[v];
+    final added = overlay.addedNodes[v];
+    final int width;
+    if (ov != null) {
+      width = ov.length;
+    } else if (added != null) {
+      width = added.labelIds.length;
+    } else if (v < base.nodeCount) {
+      width = base.labelCountOf(v);
+    } else {
+      width = 0;
+    }
+    newLabelRowPtr[v + 1] = newLabelRowPtr[v] + width;
+  }
+  final newLabels = Uint32List(newLabelRowPtr[newNodeCount]);
+  for (var v = 0; v < newNodeCount; v++) {
+    final start = newLabelRowPtr[v];
+    final ov = overlay.labelOverride[v];
+    final added = overlay.addedNodes[v];
+    if (ov != null) {
+      final sorted = ov.toList()..sort();
+      for (var i = 0; i < sorted.length; i++) {
+        newLabels[start + i] = sorted[i];
+      }
+    } else if (added != null) {
+      for (var i = 0; i < added.labelIds.length; i++) {
+        newLabels[start + i] = added.labelIds[i];
+      }
+    } else if (v < base.nodeCount) {
+      final view = base.labelsOf(v);
+      for (var i = 0; i < view.length; i++) {
+        newLabels[start + i] = view[i];
+      }
+    }
+  }
+  // PR 1 transitional [labelOf] field — synthesise the first-label
+  // scalar so legacy callers that haven't migrated yet still work.
+  // PR 4 removes the field; this loop disappears with it.
   final newLabelOf = Uint32List(newNodeCount);
-  for (var v = 0; v < base.nodeCount; v++) {
-    newLabelOf[v] = base.labelOf[v];
-  }
-  for (final e in overlay.addedNodes.entries) {
-    final firstLabel = e.value.labelIds.isEmpty ? 0 : e.value.labelIds.first;
-    newLabelOf[e.key] = firstLabel;
-  }
-  for (final e in overlay.labelOverride.entries) {
-    newLabelOf[e.key] = e.value;
+  for (var v = 0; v < newNodeCount; v++) {
+    final start = newLabelRowPtr[v];
+    final end = newLabelRowPtr[v + 1];
+    if (start < end) newLabelOf[v] = newLabels[start];
   }
 
   // Node-tombstone bitmap fed to Csr.fromEdges so the label index
@@ -104,16 +144,20 @@ Csr foldOverlayIntoCsr({
   }
 
   // Determine the label-id span so `Csr.fromEdges` sizes its
-  // labelIndex correctly.
+  // labelIndex correctly — walk the ragged `newLabels` so multi-label
+  // rows get every bucket counted.
   var labelCount = 0;
+  for (final l in newLabels) {
+    if (l + 1 > labelCount) labelCount = l + 1;
+  }
   for (final l in newLabelOf) {
     if (l + 1 > labelCount) labelCount = l + 1;
   }
   // Also account for any label that exists in the interner but isn't
   // attached to a node (the index slot for it is still allowed) — we
   // can't ask the interner from here (no reference) so we rely on the
-  // newLabelOf max. If a label was interned but unused, its index
-  // bucket simply isn't built; that matches the baseline behaviour.
+  // labels max. If a label was interned but unused, its index bucket
+  // simply isn't built; that matches the baseline behaviour.
 
   return Csr.fromEdges(
     nodeCount: newNodeCount,
@@ -121,6 +165,8 @@ Csr foldOverlayIntoCsr({
     dsts: Uint32List.fromList(survivingDsts),
     edgeTypes: Uint32List.fromList(survivingTypes),
     labelOf: newLabelOf,
+    labelRowPtr: newLabelRowPtr,
+    labels: newLabels,
     labelCount: labelCount,
     eids: Uint32List.fromList(survivingEids),
     nodeTombstones: nodeTombstones,

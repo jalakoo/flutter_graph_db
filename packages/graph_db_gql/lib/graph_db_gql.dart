@@ -7,6 +7,11 @@ library;
 
 // Public surface: lexer + parser + AST + planner + executor.
 export 'src/ast.dart';
+export 'src/diagnostics/planner_diagnostic.dart'
+    show
+        PlannerDiagnostic,
+        PlannerDiagnosticListener,
+        PlannerDiagnosticSeverity;
 export 'src/engine_extension.dart' show GqlExecuteQuery;
 export 'src/exec/executor.dart' show GqlExecutor;
 export 'src/exec/expression_eval.dart' show EvalException;

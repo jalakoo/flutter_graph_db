@@ -193,4 +193,99 @@ void main() {
       );
     });
   });
+
+  // ----- Multi-label rollout PR 3: GQL surface -----
+
+  group('multi-label patterns + functions (PR 3)', () {
+    test('(:A:B) AND-matches only nodes carrying both labels', () async {
+      final db = await _peopleDb();
+      final employeeLabel = db.internLabel('Employee');
+      await db.runTransaction((txn) {
+        txn.setNodeLabels(const Vid(0),
+            added: [employeeLabel], removed: const []);
+      });
+      db.state.mergeNow();
+
+      final both = await db.executeQuery(
+        'MATCH (n:Person:Employee) RETURN n.name',
+      );
+      expect(
+        both.rows.map((r) => r.values['n.name']).toList(),
+        ['Alice'],
+        reason: 'only vid 0 carries both Person and Employee',
+      );
+
+      final justPerson = await db.executeQuery(
+        'MATCH (n:Person) RETURN n.name',
+      );
+      expect(justPerson.rows.length, 5);
+    });
+
+    test('labels(n) returns sorted-ascending list of label names',
+        () async {
+      final db = await _peopleDb();
+      final employeeLabel = db.internLabel('Employee');
+      await db.runTransaction((txn) {
+        txn.setNodeLabels(const Vid(0),
+            added: [employeeLabel], removed: const []);
+      });
+      db.state.mergeNow();
+
+      final r = await db.executeQuery(
+        "MATCH (n:Person) WHERE n.name = 'Alice' RETURN labels(n) AS ls",
+      );
+      expect(r.rows.length, 1);
+      final ls = r.rows.single.values['ls'] as List;
+      // Sorted ascending by string per §19.5 — Employee < Person.
+      expect(ls, ['Employee', 'Person']);
+    });
+
+    test('CREATE (n:A:B) lands both labels', () async {
+      final db = await _peopleDb();
+      db.internLabel('Tagged');
+      db.internLabel('Person');
+      await db.executeQuery(
+        "CREATE (n:Person:Tagged {name: 'multi'})",
+      );
+      db.state.mergeNow();
+      final r = await db.executeQuery(
+        "MATCH (n:Person:Tagged) RETURN labels(n) AS ls",
+      );
+      expect(r.rows.length, 1);
+      expect(
+        (r.rows.single.values['ls'] as List).cast<String>(),
+        ['Person', 'Tagged'],
+      );
+    });
+  });
+
+  group('PlannerDiagnostic — node.label deprecation (PR 3 / §19.10.2)', () {
+    test('reading n.label inside RETURN fires a warning', () async {
+      final db = await _peopleDb();
+      final diags = <PlannerDiagnostic>[];
+      db.onPlannerDiagnostic = diags.add;
+      try {
+        await db.executeQuery('MATCH (n:Person) RETURN n.label AS l');
+      } catch (_) {
+        // Execution may or may not reject the changed shape; the
+        // diagnostic must fire at plan-build time regardless.
+      }
+      expect(diags.length, greaterThanOrEqualTo(1));
+      final warn = diags.firstWhere(
+        (d) => d.message.contains('n.label'),
+        orElse: () => throw StateError('no n.label diagnostic'),
+      );
+      expect(warn.severity, PlannerDiagnosticSeverity.warning);
+      expect(warn.hint, contains('labels(n)'));
+    });
+
+    test('default listener is silent (no listener set)', () async {
+      final db = await _peopleDb();
+      try {
+        await db.executeQuery('MATCH (n:Person) RETURN n.name');
+      } catch (e) {
+        fail('default path should not throw, got $e');
+      }
+    });
+  });
 }

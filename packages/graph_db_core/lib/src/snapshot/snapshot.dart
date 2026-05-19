@@ -47,7 +47,16 @@ class SnapshotMeta {
 
 /// Magic header — caller validates this before attempting a decode.
 const String _kMagic = 'GDBSNAP';
-const int _kVersion = 1;
+
+/// Snapshot version.
+///
+/// **v1** — single-label `'labelOf'` field on the `csr` section.
+/// **v2** — ragged labels (`'labelRowPtr'` + `'labels'`); multi-label
+/// rollout. The decoder accepts both; v1 is silently upgraded by
+/// synthesising rows of length 1. Per §19.6 of the multi-label plan
+/// the v1 fallback decode is retained for two minor versions, then
+/// removed.
+const int _kVersion = 2;
 
 /// Encodes [state] into a self-describing JSON blob. The state's
 /// overlay must already be merged (see [MutableGraphState.mergeNow])
@@ -82,7 +91,9 @@ const int _kVersion = 1;
     'csr': {
       'nodeCount': csr.nodeCount,
       'edgeCount': csr.edgeCount,
-      'labelOf': csr.labelOf.toList(),
+      // v2 ragged labels — sorted ascending within each row.
+      'labelRowPtr': csr.labelRowPtr.toList(),
+      'labels': csr.labels.toList(),
       'edges': _dumpEdges(csr),
     },
     'nodeProps': _dumpPropertyStore(state.nodeProps),
@@ -107,8 +118,9 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
   if (root['magic'] != _kMagic) {
     throw const FormatException('not a graph_db snapshot');
   }
-  if (root['v'] != _kVersion) {
-    throw FormatException('unsupported snapshot version: ${root['v']}');
+  final version = root['v'];
+  if (version != _kVersion && version != 1) {
+    throw FormatException('unsupported snapshot version: $version');
   }
   final meta = root['meta']! as Map<String, Object?>;
   final intern = root['intern']! as Map<String, Object?>;
@@ -126,12 +138,39 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
     strings.internPropKey(s);
   }
 
-  // CSR — rebuild via Csr.fromEdges.
+  // CSR — rebuild via Csr.fromEdges. Version 2 carries ragged labels;
+  // version 1 carries flat `labelOf` and we synthesise the ragged
+  // form (each row length 1).
   final nodeCount = csrSection['nodeCount']! as int;
   final edgeCount = csrSection['edgeCount']! as int;
-  final labelOf = Uint32List.fromList(
-    (csrSection['labelOf']! as List).cast<int>(),
-  );
+  final Uint32List labelOf;
+  final Uint32List labelRowPtr;
+  final Uint32List labels;
+  if (csrSection.containsKey('labelRowPtr') &&
+      csrSection.containsKey('labels')) {
+    labelRowPtr = Uint32List.fromList(
+      (csrSection['labelRowPtr']! as List).cast<int>(),
+    );
+    labels = Uint32List.fromList(
+      (csrSection['labels']! as List).cast<int>(),
+    );
+    // Derive legacy `labelOf` as the first-label-per-vid scalar.
+    labelOf = Uint32List(nodeCount);
+    for (var v = 0; v < nodeCount; v++) {
+      final start = labelRowPtr[v];
+      if (start < labelRowPtr[v + 1]) labelOf[v] = labels[start];
+    }
+  } else {
+    // v1 fallback — single-label labelOf, synthesise ragged.
+    labelOf = Uint32List.fromList(
+      (csrSection['labelOf']! as List).cast<int>(),
+    );
+    labelRowPtr = Uint32List(nodeCount + 1);
+    for (var v = 0; v < nodeCount; v++) {
+      labelRowPtr[v + 1] = v + 1;
+    }
+    labels = Uint32List.fromList(labelOf);
+  }
   final edges = (csrSection['edges']! as List).cast<Map<String, Object?>>();
   final srcs = Uint32List(edgeCount);
   final dsts = Uint32List(edgeCount);
@@ -144,7 +183,7 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
     eids[i] = edges[i]['eid']! as int;
   }
   var labelCount = 0;
-  for (final l in labelOf) {
+  for (final l in labels) {
     if (l + 1 > labelCount) labelCount = l + 1;
   }
   final csr = Csr.fromEdges(
@@ -153,6 +192,8 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
     dsts: dsts,
     edgeTypes: types,
     labelOf: labelOf,
+    labelRowPtr: labelRowPtr,
+    labels: labels,
     labelCount: labelCount,
     eids: eids,
   );

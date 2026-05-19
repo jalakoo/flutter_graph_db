@@ -56,21 +56,46 @@ class ConstraintCatalog {
   }
 
   /// Checks every active [ExistenceConstraint] before a property is
-  /// removed — throws if [vid] still carries the constrained label
-  /// AND [keyId] is the constrained key.
+  /// removed — throws if [vid] carries any constrained label whose
+  /// required key matches [keyId]. [hasLabel] returns true iff [vid]
+  /// effectively carries the given label (multi-label aware).
   void enforceExistenceOnDelNodeProp({
     required int vid,
     required int keyId,
-    required int Function(int vid) labelOf,
+    required bool Function(int vid, int labelId) hasLabel,
   }) {
     for (final c in _byName.values) {
       if (c is! ExistenceConstraint) continue;
       if (c.keyId != keyId) continue;
-      if (labelOf(vid) == c.labelId) {
+      if (hasLabel(vid, c.labelId)) {
         throw ConstraintViolation(
           'existence constraint "${c.name}" violated: '
           'cannot remove key $keyId from vid $vid '
           '(still carries label ${c.labelId})',
+        );
+      }
+    }
+  }
+
+  /// Re-checks existence constraints when a node gains a new label
+  /// via `SetNodeLabels`. The newly-added label may pull the node
+  /// into a constraint's scope, in which case the required key must
+  /// already be set on the node — [hasProp] resolves that. Removed
+  /// labels can only release a node from a constraint's scope and
+  /// thus never trigger a violation.
+  void enforceExistenceOnAddNodeLabel({
+    required int vid,
+    required int labelId,
+    required bool Function(int keyId) hasProp,
+  }) {
+    for (final c in _byName.values) {
+      if (c is! ExistenceConstraint) continue;
+      if (c.labelId != labelId) continue;
+      if (!hasProp(c.keyId)) {
+        throw ConstraintViolation(
+          'existence constraint "${c.name}" violated: '
+          'cannot add label $labelId to vid $vid — '
+          'missing required key ${c.keyId}',
         );
       }
     }

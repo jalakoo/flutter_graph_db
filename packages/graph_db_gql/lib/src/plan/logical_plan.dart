@@ -12,12 +12,16 @@ sealed class LogicalPlan {
   const LogicalPlan();
 }
 
-/// Scans every node carrying [labelId] (if non-null) and binds the
-/// vid to [alias]. `labelId == null` scans every visible node.
+/// Scans every node carrying **all** [labelIds] (AND semantics,
+/// matching Cypher's `(:A:B)`) and binds the vid to [alias].
+/// `labelIds == null` (or empty) scans every visible node.
 class NodeScan extends LogicalPlan {
   final String alias;
-  final int? labelId;
-  const NodeScan({required this.alias, required this.labelId});
+  final List<int>? labelIds;
+  const NodeScan({required this.alias, required this.labelIds});
+
+  /// Convenience — `null` for no filter, single id, or the full set.
+  Iterable<int> get effectiveLabelIds => labelIds ?? const [];
 }
 
 /// For each incoming row, walks edges of [direction] (filtered by

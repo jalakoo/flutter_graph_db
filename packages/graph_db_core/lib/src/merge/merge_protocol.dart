@@ -32,6 +32,9 @@ class TransferableCsr {
   final TransferableTypedData edgeIdIn;
   final TransferableTypedData edgeTypeIn;
   final TransferableTypedData labelOf;
+  // Multi-label rollout PR 2: ragged labels also transferred.
+  final TransferableTypedData labelRowPtr;
+  final TransferableTypedData labels;
 
   TransferableCsr({
     required this.nodeCount,
@@ -46,6 +49,8 @@ class TransferableCsr {
     required this.edgeIdIn,
     required this.edgeTypeIn,
     required this.labelOf,
+    required this.labelRowPtr,
+    required this.labels,
   });
 
   /// Copies every `Uint32List` of [csr] into a fresh buffer and wraps
@@ -53,7 +58,7 @@ class TransferableCsr {
   /// arrays — only the wrapped copies are moved on send.
   factory TransferableCsr.copyAndWrap(Csr csr) {
     var maxLabel = 0;
-    for (final l in csr.labelOf) {
+    for (final l in csr.labels) {
       if (l + 1 > maxLabel) maxLabel = l + 1;
     }
     return TransferableCsr(
@@ -69,6 +74,8 @@ class TransferableCsr {
       edgeIdIn: _wrapCopy(csr.edgeIdIn),
       edgeTypeIn: _wrapCopy(csr.edgeTypeIn),
       labelOf: _wrapCopy(csr.labelOf),
+      labelRowPtr: _wrapCopy(csr.labelRowPtr),
+      labels: _wrapCopy(csr.labels),
     );
   }
 
@@ -87,19 +94,29 @@ class TransferableCsr {
     final edgeIdInM = edgeIdIn.materialize().asUint32List();
     final edgeTypeInM = edgeTypeIn.materialize().asUint32List();
     final labelOfM = labelOf.materialize().asUint32List();
-    // Rebuild labelIndex from labelOf — cheap (one pass over nodeCount).
-    final labelIndex = <int, Uint32List>{};
-    final counts = Uint32List(labelCount == 0 ? 1 : labelCount);
+    final labelRowPtrM = labelRowPtr.materialize().asUint32List();
+    final labelsM = labels.materialize().asUint32List();
+    // Rebuild labelIndex from the ragged labels.
+    final effLabelCount = labelCount == 0 ? 1 : labelCount;
+    final counts = Uint32List(effLabelCount);
     for (var v = 0; v < nodeCount; v++) {
-      counts[labelOfM[v]]++;
+      final end = labelRowPtrM[v + 1];
+      for (var i = labelRowPtrM[v]; i < end; i++) {
+        final l = labelsM[i];
+        if (l < effLabelCount) counts[l]++;
+      }
     }
-    for (var l = 0; l < counts.length; l++) {
+    final labelIndex = <int, Uint32List>{};
+    for (var l = 0; l < effLabelCount; l++) {
       labelIndex[l] = Uint32List(counts[l]);
     }
-    final fill = Uint32List(counts.length);
+    final fill = Uint32List(effLabelCount);
     for (var v = 0; v < nodeCount; v++) {
-      final l = labelOfM[v];
-      labelIndex[l]![fill[l]++] = v;
+      final end = labelRowPtrM[v + 1];
+      for (var i = labelRowPtrM[v]; i < end; i++) {
+        final l = labelsM[i];
+        if (l < effLabelCount) labelIndex[l]![fill[l]++] = v;
+      }
     }
     return Csr(
       nodeCount: nodeCount,
@@ -113,6 +130,8 @@ class TransferableCsr {
       edgeIdIn: edgeIdInM,
       edgeTypeIn: edgeTypeInM,
       labelOf: labelOfM,
+      labelRowPtr: labelRowPtrM,
+      labels: labelsM,
       labelIndex: labelIndex,
     );
   }
@@ -134,8 +153,10 @@ class TransferableOverlay {
   final TransferableTypedData addedEdgeTypes;
   final List<String> addedEdgeLogicalIds;
 
-  // Added nodes (v1 single-label, so one label id per node)
+  // Added nodes — ragged labels (PR 2): one row per node into
+  // addedNodeLabels via addedNodeLabelRowPtr.
   final TransferableTypedData addedNodeVids;
+  final TransferableTypedData addedNodeLabelRowPtr;
   final TransferableTypedData addedNodeLabels;
   final List<String> addedNodeLogicalIds;
 
@@ -143,8 +164,10 @@ class TransferableOverlay {
   final TransferableTypedData deletedEdges;
   final TransferableTypedData deletedNodes;
 
-  // Label overrides
+  // Label overrides — ragged sets (PR 2): one row per overridden vid
+  // into labelOverrideLabels via labelOverrideRowPtr.
   final TransferableTypedData labelOverrideVids;
+  final TransferableTypedData labelOverrideRowPtr;
   final TransferableTypedData labelOverrideLabels;
 
   TransferableOverlay({
@@ -154,11 +177,13 @@ class TransferableOverlay {
     required this.addedEdgeTypes,
     required this.addedEdgeLogicalIds,
     required this.addedNodeVids,
+    required this.addedNodeLabelRowPtr,
     required this.addedNodeLabels,
     required this.addedNodeLogicalIds,
     required this.deletedEdges,
     required this.deletedNodes,
     required this.labelOverrideVids,
+    required this.labelOverrideRowPtr,
     required this.labelOverrideLabels,
   });
 
@@ -179,28 +204,49 @@ class TransferableOverlay {
       aeTypes[i] = e.value.typeId;
       aeLogicalIds.add(e.value.logicalId);
     }
-    // ----- added nodes
+    // ----- added nodes (ragged labels)
     final anEntries = overlay.addedNodes.entries.toList();
     final anN = anEntries.length;
     final anVids = Uint32List(anN);
-    final anLabels = Uint32List(anN);
+    final anLabelRowPtr = Uint32List(anN + 1);
     final anLogicalIds = <String>[];
+    var anTotalLabels = 0;
+    for (var i = 0; i < anN; i++) {
+      anTotalLabels += anEntries[i].value.labelIds.length;
+    }
+    final anLabels = Uint32List(anTotalLabels);
+    var cursor = 0;
     for (var i = 0; i < anN; i++) {
       final e = anEntries[i];
       anVids[i] = e.key;
-      anLabels[i] = e.value.labelIds.isEmpty ? 0 : e.value.labelIds.first;
       anLogicalIds.add(e.value.logicalId);
+      for (final l in e.value.labelIds) {
+        anLabels[cursor++] = l;
+      }
+      anLabelRowPtr[i + 1] = cursor;
     }
     // ----- deleted
     final delE = Uint32List.fromList(overlay.deletedEdges.toList());
     final delN = Uint32List.fromList(overlay.deletedNodes.toList());
-    // ----- label override
+    // ----- label override (ragged sets)
     final loEntries = overlay.labelOverride.entries.toList();
-    final loVids = Uint32List(loEntries.length);
-    final loLabels = Uint32List(loEntries.length);
-    for (var i = 0; i < loEntries.length; i++) {
+    final loN = loEntries.length;
+    final loVids = Uint32List(loN);
+    final loRowPtr = Uint32List(loN + 1);
+    var loTotal = 0;
+    for (var i = 0; i < loN; i++) {
+      loTotal += loEntries[i].value.length;
+    }
+    final loLabels = Uint32List(loTotal);
+    var loCursor = 0;
+    for (var i = 0; i < loN; i++) {
       loVids[i] = loEntries[i].key;
-      loLabels[i] = loEntries[i].value;
+      // Sort the set so the receiver doesn't have to.
+      final sorted = loEntries[i].value.toList()..sort();
+      for (final l in sorted) {
+        loLabels[loCursor++] = l;
+      }
+      loRowPtr[i + 1] = loCursor;
     }
 
     return TransferableOverlay(
@@ -210,11 +256,13 @@ class TransferableOverlay {
       addedEdgeTypes: TransferableTypedData.fromList([aeTypes]),
       addedEdgeLogicalIds: aeLogicalIds,
       addedNodeVids: TransferableTypedData.fromList([anVids]),
+      addedNodeLabelRowPtr: TransferableTypedData.fromList([anLabelRowPtr]),
       addedNodeLabels: TransferableTypedData.fromList([anLabels]),
       addedNodeLogicalIds: anLogicalIds,
       deletedEdges: TransferableTypedData.fromList([delE]),
       deletedNodes: TransferableTypedData.fromList([delN]),
       labelOverrideVids: TransferableTypedData.fromList([loVids]),
+      labelOverrideRowPtr: TransferableTypedData.fromList([loRowPtr]),
       labelOverrideLabels: TransferableTypedData.fromList([loLabels]),
     );
   }
@@ -238,13 +286,17 @@ class TransferableOverlay {
       );
     }
     final anVids = addedNodeVids.materialize().asUint32List();
+    final anRowPtr = addedNodeLabelRowPtr.materialize().asUint32List();
     final anLabels = addedNodeLabels.materialize().asUint32List();
     for (var i = 0; i < anVids.length; i++) {
+      final labels = <int>[
+        for (var j = anRowPtr[i]; j < anRowPtr[i + 1]; j++) anLabels[j],
+      ];
       out.recordAddNode(
         anVids[i],
         AddedNode(
           logicalId: addedNodeLogicalIds[i],
-          labelIds: [anLabels[i]],
+          labelIds: labels,
         ),
       );
     }
@@ -257,9 +309,13 @@ class TransferableOverlay {
       out.deletedNodes.add(v);
     }
     final loVids = labelOverrideVids.materialize().asUint32List();
+    final loRowPtr = labelOverrideRowPtr.materialize().asUint32List();
     final loLabels = labelOverrideLabels.materialize().asUint32List();
     for (var i = 0; i < loVids.length; i++) {
-      out.labelOverride[loVids[i]] = loLabels[i];
+      final set = <int>{
+        for (var j = loRowPtr[i]; j < loRowPtr[i + 1]; j++) loLabels[j],
+      };
+      out.labelOverride[loVids[i]] = set;
     }
     return out;
   }

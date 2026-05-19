@@ -435,23 +435,23 @@ class MutableGraphState {
     }
     if (labelIds.isEmpty) {
       throw ConstraintViolation(
-          'AddNode requires at least one label id (v1 single-label '
-          'storage — multi-label is a future)');
+          'AddNode requires at least one label id');
     }
-    if (labelIds.length > 1) {
-      throw ConstraintViolation(
-          'AddNode given ${labelIds.length} labels; v1 is single-label '
-          '');
+    // Defensive dedupe + sort — caller bug shouldn't corrupt the
+    // sorted-ascending row invariant (`Csr.hasLabel` relies on it).
+    final sortedLabels = (Set<int>.of(labelIds).toList())..sort();
+    // Existence-constraint pre-check — fail before any property
+    // writes so partial state isn't left behind. Applies per-label
+    // (Neo4j-aligned: a constraint on L applies to any node carrying L).
+    for (final labelId in sortedLabels) {
+      constraints.enforceExistenceOnAddNode(
+        labelId: labelId,
+        props: props,
+      );
     }
-    // Existence-constraint pre-check — fail
-    // before any property writes so partial state isn't left behind.
-    constraints.enforceExistenceOnAddNode(
-      labelId: labelIds.first,
-      props: props,
-    );
     overlay.recordAddNode(
       vid.value,
-      AddedNode(logicalId: logicalId, labelIds: List.of(labelIds)),
+      AddedNode(logicalId: logicalId, labelIds: sortedLabels),
     );
     // Pre-check unique constraints across the whole prop bundle so
     // partial writes aren't left behind on rejection.
@@ -496,34 +496,75 @@ class MutableGraphState {
     _maintainAllNodeIndexes(deletedVid: vid.value);
   }
 
-  /// Applies a `SetNodeLabels` WAL op under v1's single-label
-  /// constraint. Accepts `(added: [newLabel], removed: [oldLabel])`
-  /// (a relabel) or `(added: [], removed: [oldLabel])` and `(added:
-  /// [newLabel], removed: [])` are also accepted as no-replace /
-  /// no-prior single-label transitions.
+  /// Applies a `SetNodeLabels` WAL op. Merges [added] into and removes
+  /// [removed] from the node's current effective label set. Idempotent
+  /// — re-adding a label already present or removing one already
+  /// absent is a no-op for that element.
+  ///
+  /// Throws [ConstraintViolation] if:
+  /// - [added] and [removed] intersect (caller bug — disjoint inputs
+  ///   required).
+  /// - The resulting set would be empty (per §4.6 of the multi-label
+  ///   plan — every node carries at least one label).
+  ///
+  /// Re-validates existence + unique constraints for every label in
+  /// `added ∪ removed`.
   void applySetNodeLabels(
     Vid vid, {
     required List<int> added,
     required List<int> removed,
   }) {
-    if (added.length > 1 || removed.length > 1) {
-      throw ConstraintViolation(
-          'SetNodeLabels v1 single-label only (added=${added.length}, '
-          'removed=${removed.length}); multi-label is a future');
-    }
     if (!_nodeExists(vid.value)) {
       throw NotFoundException('SetNodeLabels on absent vid ${vid.value}');
     }
-    if (added.isEmpty) return; // removed-only is a no-op under single-label
-    final newLabel = added.first;
-    // Overlay-added node? mutate AddedNode.labelIds in place.
+    final addedSet = Set<int>.of(added);
+    final removedSet = Set<int>.of(removed);
+    final intersection = addedSet.intersection(removedSet);
+    if (intersection.isNotEmpty) {
+      throw ConstraintViolation(
+          'SetNodeLabels: added and removed intersect on $intersection');
+    }
+    // Compute the new effective set. Seed from the current effective
+    // labels (overlay-added node → in-place; override → existing set;
+    // base CSR → ragged labels view).
+    final newSet = <int>{};
     final addedNode = overlay.addedNodes[vid.value];
+    if (addedNode != null) {
+      newSet.addAll(addedNode.labelIds);
+    } else if (overlay.labelOverride.containsKey(vid.value)) {
+      newSet.addAll(overlay.labelOverride[vid.value]!);
+    } else {
+      for (final id in csr.labelsOf(vid.value)) {
+        newSet.add(id);
+      }
+    }
+    newSet.removeAll(removedSet);
+    newSet.addAll(addedSet);
+    if (newSet.isEmpty) {
+      throw ConstraintViolation(
+          'SetNodeLabels would empty the label set for vid ${vid.value}; '
+          'every node must carry at least one label');
+    }
+    // Existence-constraint re-check: every label being *added* may pull
+    // the node under a new existence constraint's scope. Removed labels
+    // can only release constraints — never trigger them — so this loop
+    // only covers added.
+    for (final labelId in addedSet) {
+      constraints.enforceExistenceOnAddNodeLabel(
+        vid: vid.value,
+        labelId: labelId,
+        hasProp: (keyId) => nodeProps.has(vid.value, keyId),
+      );
+    }
+    // Persist into the overlay. Overlay-added node = mutate
+    // AddedNode.labelIds in place (sorted ascending); pre-existing CSR
+    // node = labelOverride set.
     if (addedNode != null) {
       addedNode.labelIds
         ..clear()
-        ..add(newLabel);
+        ..addAll(newSet.toList()..sort());
     } else {
-      overlay.recordSetNodeLabel(vid.value, newLabel);
+      overlay.recordSetNodeLabels(vid.value, newSet);
     }
   }
 
@@ -542,7 +583,7 @@ class MutableGraphState {
     constraints.enforceExistenceOnDelNodeProp(
       vid: vid.value,
       keyId: keyId,
-      labelOf: (v) => effectiveLabelOf(Vid(v)),
+      hasLabel: (v, l) => hasLabelEffective(Vid(v), l),
     );
     nodeProps.remove(vid.value, keyId);
     _maintainNodeIndexes(vid.value, keyId);
@@ -655,14 +696,34 @@ class MutableGraphState {
     return overlay.addedNodes.containsKey(v);
   }
 
-  /// The effective single label for [vid] — overlay override first,
-  /// then [AddedNode.labelIds.first], then `csr.labelOf[vid]`.
-  int effectiveLabelOf(Vid vid) {
+  /// True iff [vid] effectively carries [labelId] (CSR base + overlay
+  /// overrides + overlay-added nodes). Allocation-free on the CSR
+  /// path; O(k) on overlay-resident sets where k is per-vid label
+  /// count (typically 1–4).
+  bool hasLabelEffective(Vid vid, int labelId) {
+    final override = overlay.labelOverride[vid.value];
+    if (override != null) return override.contains(labelId);
+    final added = overlay.addedNodes[vid.value];
+    if (added != null) {
+      // AddedNode.labelIds is sorted ascending — small list, linear
+      // scan is faster than binary search for k ≤ ~10.
+      for (final id in added.labelIds) {
+        if (id == labelId) return true;
+      }
+      return false;
+    }
+    return csr.hasLabel(vid.value, labelId);
+  }
+
+  /// Effective label-id set for [vid]. Overlay-aware. Returns a view
+  /// where possible (zero-copy off the CSR); returns the live overlay
+  /// set or list for overlay-resident entries.
+  Iterable<int> effectiveLabelsOf(Vid vid) {
     final override = overlay.labelOverride[vid.value];
     if (override != null) return override;
     final added = overlay.addedNodes[vid.value];
-    if (added != null) return added.labelIds.first;
-    return csr.labelOf[vid.value];
+    if (added != null) return added.labelIds;
+    return csr.labelsOf(vid.value);
   }
 
   /// Iterates the live outgoing edges of [vid] — CSR slice (filtered
@@ -1106,27 +1167,33 @@ class MutableGraphState {
   }
 
   void _forEachVidWithLabel(int labelId, void Function(int) visit) {
+    // 1. Walk every base-CSR vid carrying [labelId] — but skip if a
+    //    label-override has rewritten the set and that set no longer
+    //    contains the label.
     final base = _csr.labelIndex[labelId];
     if (base != null) {
       for (final v in base) {
         if (overlay.deletedNodes.contains(v)) continue;
         final ov = overlay.labelOverride[v];
-        if (ov != null && ov != labelId) continue;
+        if (ov != null && !ov.contains(labelId)) continue;
         visit(v);
       }
     }
+    // 2. Overlay-added nodes whose set contains [labelId].
     for (final entry in overlay.addedNodes.entries) {
       if (overlay.deletedNodes.contains(entry.key)) continue;
-      if (entry.value.labelIds.isNotEmpty &&
-          entry.value.labelIds.first == labelId) {
+      if (entry.value.labelIds.contains(labelId)) {
         visit(entry.key);
       }
     }
+    // 3. Pre-existing CSR vids that *gained* [labelId] via a
+    //    label-override (i.e. the base CSR didn't carry it).
     for (final entry in overlay.labelOverride.entries) {
-      if (entry.value != labelId) continue;
+      if (!entry.value.contains(labelId)) continue;
       if (overlay.deletedNodes.contains(entry.key)) continue;
       if (entry.key < _csr.nodeCount &&
-          _csr.labelOf[entry.key] == labelId) {
+          _csr.hasLabel(entry.key, labelId)) {
+        // Already yielded by step 1.
         continue;
       }
       visit(entry.key);

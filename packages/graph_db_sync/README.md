@@ -56,6 +56,27 @@ for (final r in reports) {
     `db.currentLsn`. Used for new targets that need to be seeded from
     the current state of the graph.
 
+## Unlabeled remote nodes
+
+`graph_db_core` requires every node to carry at least one label (see
+the multi-label plan §4.6). When syncing from a remote backend that
+allows label-less nodes (e.g. Neo4j permits `CREATE (n {p: 1})`), the
+sync engine substitutes `'unlabeled_node'` and emits a `stderr`
+warning on each substitution:
+
+```text
+[graph_db_sync] WARNING: remote node "<logicalId>" had no labels;
+  substituting fallback label "unlabeled_node". Override via
+  SyncEngine.unlabeledFallback or filter these nodes upstream.
+```
+
+Override the fallback label via
+`engine.unlabeledFallback = 'External';`, or set it to `null` to
+reject unlabelled remote nodes with a `SyncException` instead — useful
+for projects whose schema invariant is "every node must have a label"
+and you want data-quality issues to surface at the boundary instead
+of being papered over.
+
 ## Carry-forwards
 
 - HWM persistence (snapshotted alongside the engine's snapshot meta)

@@ -15,11 +15,11 @@ sealed class ImportOp {
 
 class ImportNode extends ImportOp {
   final String logicalId;
-  final String label;
+  final List<String> labels;
   final Map<String, PropValue> properties;
   const ImportNode({
     required this.logicalId,
-    required this.label,
+    required this.labels,
     required this.properties,
   });
 }

@@ -9,6 +9,7 @@ library;
 import 'package:graph_db_core/graph_db_core.dart';
 
 import 'ast.dart';
+import 'diagnostics/planner_diagnostic.dart';
 import 'exec/executor.dart';
 import 'exec/expression_eval.dart';
 import 'exec/result_row.dart';
@@ -21,6 +22,12 @@ import 'plan_cache.dart';
 /// public surface.
 final Expando<GqlPlanCache> _planCacheExpando =
     Expando<GqlPlanCache>('gqlPlanCache');
+
+/// Per-`GraphDb` planner-diagnostic listener — opt-in. Apps that
+/// don't set this see no diagnostics; set
+/// `db.onPlannerDiagnostic = (d) { ... }` to receive them.
+final Expando<PlannerDiagnosticListener> _diagListenerExpando =
+    Expando<PlannerDiagnosticListener>('plannerDiagnostic');
 
 extension GqlExecuteQuery on GraphDb {
   /// Parses, plans (LRU-cached), and executes [query] against this
@@ -53,7 +60,10 @@ extension GqlExecuteQuery on GraphDb {
       return _executeMatchWithMutations(stmt, params);
     }
     final cache = gqlPlanCache;
-    final plan = cache.getOrBuild(query, () => GqlPlanner(this).plan(stmt));
+    final plan = cache.getOrBuild(
+      query,
+      () => GqlPlanner(this, onDiagnostic: onPlannerDiagnostic).plan(stmt),
+    );
     return GqlExecutor(this).materialize(plan, params);
   }
 
@@ -110,9 +120,11 @@ extension GqlExecuteQuery on GraphDb {
         'CREATE node requires at least one :Label',
       );
     }
-    final labelId = state.strings.internLabel(n.labels.first);
+    final labelIds = <int>[
+      for (final l in n.labels) state.strings.internLabel(l),
+    ]..sort();
     return txn.addNode(
-      labelIds: [labelId],
+      labelIds: labelIds,
       props: _evalInlineProps(n.properties, eval),
     );
   }
@@ -161,7 +173,8 @@ extension GqlExecuteQuery on GraphDb {
         items: _bindingsAsReturnItems(stmt.patterns),
       ),
     );
-    final plan = GqlPlanner(this).plan(readStmt);
+    final plan =
+        GqlPlanner(this, onDiagnostic: onPlannerDiagnostic).plan(readStmt);
     final preRows = <ResultRow>[];
     await for (final row in GqlExecutor(this).execute(plan, params)) {
       preRows.add(row);
@@ -188,7 +201,8 @@ extension GqlExecuteQuery on GraphDb {
       skip: stmt.skip,
       limit: stmt.limit,
     );
-    final projPlan = GqlPlanner(this).plan(projStmt);
+    final projPlan =
+        GqlPlanner(this, onDiagnostic: onPlannerDiagnostic).plan(projStmt);
     return GqlExecutor(this).materialize(projPlan, params);
   }
 
@@ -273,9 +287,11 @@ extension GqlExecuteQuery on GraphDb {
         'MERGE node requires at least one :Label (v1)',
       );
     }
-    // Pre-intern the label so the read planner can resolve it even
-    // when the engine has never seen this label before.
-    state.strings.internLabel(node.labels.first);
+    // Pre-intern every label so the read planner can resolve them
+    // even when the engine has never seen them before.
+    for (final l in node.labels) {
+      state.strings.internLabel(l);
+    }
     // Step 1 — try to MATCH.
     final matchStmt = MatchStatement(
       patterns: [
@@ -292,7 +308,8 @@ extension GqlExecuteQuery on GraphDb {
         ],
       ),
     );
-    final readPlan = GqlPlanner(this).plan(matchStmt);
+    final readPlan =
+        GqlPlanner(this, onDiagnostic: onPlannerDiagnostic).plan(matchStmt);
     final hits = await GqlExecutor(this).materialize(readPlan, params);
     if (hits.rows.isNotEmpty) {
       final boundVid = hits.rows.first.values[node.alias!] as Vid;
@@ -306,9 +323,11 @@ extension GqlExecuteQuery on GraphDb {
     final eval = ExpressionEvaluator(this, params);
     Vid? created;
     await runTransaction((txn) {
-      final labelId = state.strings.internLabel(node.labels.first);
+      final labelIds = <int>[
+        for (final l in node.labels) state.strings.internLabel(l),
+      ]..sort();
       created = txn.addNode(
-        labelIds: [labelId],
+        labelIds: labelIds,
         props: _evalInlineProps(node.properties, eval),
       );
     }, durability: Durability.group);
@@ -345,4 +364,16 @@ extension GqlExecuteQuery on GraphDb {
   /// (the engine doesn't currently auto-invalidate on intern).
   GqlPlanCache get gqlPlanCache =>
       _planCacheExpando[this] ??= GqlPlanCache();
+
+  /// Non-fatal planner observability — fires during plan-build for
+  /// deprecated syntax and other warnings. Silent by default; set a
+  /// listener to receive `PlannerDiagnostic`s. Mirrors the
+  /// `onIndexSizeEvent` pattern in `graph_db_core`. Currently
+  /// surfaces only the multi-label-rollout `node.label` deprecation
+  /// (`5_MULTILABEL_PLAN.md` §19.9).
+  PlannerDiagnosticListener? get onPlannerDiagnostic =>
+      _diagListenerExpando[this];
+  set onPlannerDiagnostic(PlannerDiagnosticListener? listener) {
+    _diagListenerExpando[this] = listener;
+  }
 }

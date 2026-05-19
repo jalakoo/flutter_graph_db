@@ -100,4 +100,99 @@ void main() {
       throwsArgumentError,
     );
   });
+
+  // ----- Multi-label rollout PR 1 -----
+  //
+  // Ragged-CSR storage is built alongside the legacy single-label
+  // `labelOf` (each row length 1 under the v1 invariant). PR 2 lifts
+  // the invariant and rewires the build loop; these tests pin the
+  // shape so PR 2's broader fold change is visible.
+
+  test('PR 1: ragged labelRowPtr/labels mirror single-label labelOf', () {
+    final csr = _buildFixture();
+    expect(csr.labelRowPtr.length, csr.nodeCount + 1);
+    expect(csr.labels.length, csr.nodeCount);
+    for (var v = 0; v < csr.nodeCount; v++) {
+      expect(csr.labelCountOf(v), 1, reason: 'single-label invariant');
+      expect(csr.labelsOf(v).single, csr.labelOf[v]);
+    }
+  });
+
+  test('PR 1: hasLabel matches labelOf for every vid', () {
+    final csr = _buildFixture();
+    for (var v = 0; v < csr.nodeCount; v++) {
+      expect(csr.hasLabel(v, csr.labelOf[v]), isTrue);
+      expect(csr.hasLabel(v, csr.labelOf[v] + 100), isFalse,
+          reason: 'unseen label id returns false');
+    }
+  });
+
+  test('PR 1: labelsOf returns a zero-copy Uint32List view', () {
+    final csr = _buildFixture();
+    final view = csr.labelsOf(0);
+    expect(view, isA<Uint32List>());
+    expect(view.length, 1);
+    expect(view[0], 0);
+  });
+
+  // ----- Multi-label rollout PR 2 (ragged-CSR build) -----
+
+  test('PR 2: ragged input builds multi-bucket label index', () {
+    final labelRowPtr = Uint32List.fromList([0, 2, 3, 4]);
+    final labels = Uint32List.fromList([0, 1, 0, 2]);
+    final labelOf = Uint32List.fromList([0, 0, 2]);
+    final csr = Csr.fromEdges(
+      nodeCount: 3,
+      srcs: Uint32List.fromList([0]),
+      dsts: Uint32List.fromList([1]),
+      edgeTypes: Uint32List.fromList([0]),
+      labelOf: labelOf,
+      labelRowPtr: labelRowPtr,
+      labels: labels,
+      labelCount: 3,
+    );
+    expect(csr.labelIndex[0], orderedEquals([0, 1]));
+    expect(csr.labelIndex[1], orderedEquals([0]));
+    expect(csr.labelIndex[2], orderedEquals([2]));
+    expect(csr.hasLabel(0, 0), isTrue);
+    expect(csr.hasLabel(0, 1), isTrue);
+    expect(csr.hasLabel(0, 2), isFalse);
+    expect(csr.labelCountOf(0), 2);
+    expect(csr.labelCountOf(1), 1);
+  });
+
+  test('PR 2: hasLabel uses binary search across edge positions', () {
+    final csr = Csr.fromEdges(
+      nodeCount: 1,
+      srcs: Uint32List(0),
+      dsts: Uint32List(0),
+      edgeTypes: Uint32List(0),
+      labelOf: Uint32List.fromList([1]),
+      labelRowPtr: Uint32List.fromList([0, 5]),
+      labels: Uint32List.fromList([1, 3, 5, 7, 9]),
+      labelCount: 10,
+    );
+    expect(csr.hasLabel(0, 1), isTrue);
+    expect(csr.hasLabel(0, 5), isTrue);
+    expect(csr.hasLabel(0, 9), isTrue);
+    expect(csr.hasLabel(0, 0), isFalse);
+    expect(csr.hasLabel(0, 4), isFalse);
+    expect(csr.hasLabel(0, 10), isFalse);
+  });
+
+  test('PR 2: tombstoned vid excluded from every label bucket', () {
+    final csr = Csr.fromEdges(
+      nodeCount: 2,
+      srcs: Uint32List(0),
+      dsts: Uint32List(0),
+      edgeTypes: Uint32List(0),
+      labelOf: Uint32List.fromList([0, 0]),
+      labelRowPtr: Uint32List.fromList([0, 2, 4]),
+      labels: Uint32List.fromList([0, 1, 0, 1]),
+      labelCount: 2,
+      nodeTombstones: Uint8List.fromList([0, 1]),
+    );
+    expect(csr.labelIndex[0], orderedEquals([0]));
+    expect(csr.labelIndex[1], orderedEquals([0]));
+  });
 }

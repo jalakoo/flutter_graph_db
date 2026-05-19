@@ -91,7 +91,7 @@ class FakeRemoteClient implements RemoteGraphClient {
   Stream<GraphElement> bulkExport(SubgraphSpec spec) async* {
     yield const RemoteNode(
       logicalId: 'n-1',
-      label: 'Demo',
+      labels: ['Demo'],
       properties: {},
     );
     yield const RemoteEdge(
@@ -139,7 +139,7 @@ void main() {
       await c.connect();
       Stream<ImportOp> ops() async* {
         yield const ImportNode(
-          logicalId: 'a', label: 'L', properties: {},
+          logicalId: 'a', labels: ['L'], properties: {},
         );
         yield const ImportEdge(
           logicalId: 'e',
@@ -205,7 +205,7 @@ void main() {
     test('RemoteNode + RemoteEdge implement the GraphNode / GraphEdge'
         ' interfaces', () {
       const node = RemoteNode(
-        logicalId: 'n', label: 'P', properties: {},
+        logicalId: 'n', labels: ['P'], properties: {},
       );
       const edge = RemoteEdge(
         logicalId: 'e',
@@ -238,7 +238,7 @@ void main() {
         'age': const PropInt(36),
       };
       final n = RemoteNode(
-          logicalId: 'n', label: 'P', properties: p);
+          logicalId: 'n', labels: const ['P'], properties: p);
       expect(n.properties['name'], isA<PropString>());
       expect(n.properties['age'], isA<PropInt>());
     });

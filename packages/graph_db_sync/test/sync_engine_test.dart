@@ -240,4 +240,108 @@ void main() {
       expect(remote.importBatches.length, batchesAfterFirst);
     });
   });
+
+  // ----- Multi-label rollout PR 4 (§14.9 + §19.10.3) -----
+
+  group('unlabeled-node fallback (PR 4 / §19.10.3)', () {
+    SyncEngine engineOnly() {
+      final state = MutableGraphState.fromFixture(
+        nodeCount: 0,
+        srcs: Uint32List(0),
+        dsts: Uint32List(0),
+        edgeTypes: Uint32List(0),
+        labelOf: Uint32List(0),
+        labelNames: const [],
+        edgeTypeNames: const [],
+      );
+      final db = GraphDb.fromState(state);
+      return SyncEngine(
+        db: db,
+        walStore: InMemoryWalStore(),
+        targets: const [],
+      );
+    }
+
+    test('default fallback substitutes "unlabeled_node"', () {
+      final engine = engineOnly();
+      const op = ImportNode(
+        logicalId: 'remote-1',
+        labels: [],
+        properties: {},
+      );
+      expect(engine.applyUnlabeledFallback(op), ['unlabeled_node']);
+    });
+
+    test('custom override is honoured', () {
+      final engine = engineOnly()..unlabeledFallback = 'External';
+      const op = ImportNode(
+        logicalId: 'remote-2',
+        labels: [],
+        properties: {},
+      );
+      expect(engine.applyUnlabeledFallback(op), ['External']);
+    });
+
+    test('null fallback rejects with SyncException', () {
+      final engine = engineOnly()..unlabeledFallback = null;
+      const op = ImportNode(
+        logicalId: 'remote-3',
+        labels: [],
+        properties: {},
+      );
+      expect(
+        () => engine.applyUnlabeledFallback(op),
+        throwsA(isA<SyncException>()),
+      );
+    });
+
+    test('non-empty labels pass through unchanged', () {
+      final engine = engineOnly();
+      const op = ImportNode(
+        logicalId: 'remote-4',
+        labels: ['A', 'B'],
+        properties: {},
+      );
+      expect(engine.applyUnlabeledFallback(op), ['A', 'B']);
+    });
+  });
+
+  group('multi-label sync (PR 4 / §14.9)', () {
+    test('seed pushes ImportNode.labels with full label set', () async {
+      // Build a state with one multi-label node.
+      final state = MutableGraphState.fromFixture(
+        nodeCount: 1,
+        srcs: Uint32List(0),
+        dsts: Uint32List(0),
+        edgeTypes: Uint32List(0),
+        labelOf: Uint32List.fromList([0]),
+        labelNames: const ['Person'],
+        edgeTypeNames: const [],
+        vidSpace: 16,
+      );
+      final db = GraphDb.fromState(state);
+      final employee = db.internLabel('Employee');
+      await db.runTransaction((txn) {
+        txn.setNodeLabels(const Vid(0),
+            added: [employee], removed: const []);
+      });
+      db.state.mergeNow();
+
+      final remote = FakeRemoteClient();
+      final target = SyncTarget(
+        name: 't',
+        client: remote,
+        seedingMode: SeedingMode.fullExport,
+      );
+      final engine = SyncEngine(
+        db: db,
+        walStore: InMemoryWalStore(),
+        targets: [target],
+      );
+      await engine.syncOnce();
+
+      final n = remote.importBatches.first.whereType<ImportNode>().single;
+      expect(n.labels..sort(), ['Employee', 'Person']);
+    });
+  });
 }

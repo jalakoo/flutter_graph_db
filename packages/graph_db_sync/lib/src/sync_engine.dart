@@ -20,7 +20,23 @@ import 'package:graph_db_core/graph_db_core.dart';
 import 'package:graph_db_remote/graph_db_remote.dart';
 import 'package:graph_db_wal/graph_db_wal.dart';
 
+import '_diag.dart';
 import 'sync_target.dart';
+
+/// Substituted for remote `ImportNode.labels` that arrive empty —
+/// preserves the local engine's "every node has at least one label"
+/// invariant (`5_MULTILABEL_PLAN.md` §4.6). Set
+/// `SyncEngine.unlabeledFallback` to override per engine instance;
+/// set to `null` to reject empty-label inbound nodes with a
+/// `SyncException` instead.
+const String kDefaultUnlabeledFallback = 'unlabeled_node';
+
+class SyncException implements Exception {
+  final String message;
+  SyncException(this.message);
+  @override
+  String toString() => 'SyncException: $message';
+}
 
 class SyncRunReport {
   final String targetName;
@@ -63,12 +79,40 @@ class SyncEngine {
   /// stream call.
   final int importBatchSize;
 
+  /// Label substituted for inbound remote nodes whose label list is
+  /// empty. Default `'unlabeled_node'`. Set to a project-specific
+  /// label (e.g. `'External'`) to fit your schema; set to `null` to
+  /// reject empty-label nodes with a [SyncException] instead. See
+  /// `5_MULTILABEL_PLAN.md` §19.10.3.
+  String? unlabeledFallback;
+
   SyncEngine({
     required this.db,
     required this.walStore,
     required this.targets,
     this.importBatchSize = 1024,
+    this.unlabeledFallback = kDefaultUnlabeledFallback,
   });
+
+  /// Used by ingest paths that consume `ImportNode.labels` — applies
+  /// the [unlabeledFallback] policy and emits the console warning on
+  /// substitution. Returns a *non-empty* labels list (or throws).
+  List<String> applyUnlabeledFallback(ImportNode op) {
+    if (op.labels.isNotEmpty) return op.labels;
+    final fb = unlabeledFallback;
+    if (fb == null) {
+      throw SyncException(
+        'remote node "${op.logicalId}" arrived with no labels and '
+        'SyncEngine.unlabeledFallback is null',
+      );
+    }
+    syncWarn(
+      '[graph_db_sync] WARNING: remote node "${op.logicalId}" had no '
+      'labels; substituting fallback label "$fb". Override via '
+      'SyncEngine.unlabeledFallback or filter these nodes upstream.',
+    );
+    return [fb];
+  }
 
   /// Drains every committed WAL op past each target's HWM, ships
   /// them via [RemoteGraphClient.bulkImport], and updates the HWM
@@ -179,22 +223,23 @@ class SyncEngine {
       if (!db.state.isNodeVisible(Vid(v))) continue;
       final addedNode = db.state.overlay.addedNodes[v];
       final logicalId = addedNode?.logicalId ?? 'local-$v';
-      final labelId = db.state.effectiveLabelOf(Vid(v));
-      final label = db.state.strings.labelOf(labelId) ?? 'Node';
+      final labels = _labelsForVid(Vid(v));
       imports.add(ImportNode(
         logicalId: logicalId,
-        label: label,
+        labels: labels,
         properties: _collectProps(db.state.nodeProps, v),
       ));
     }
     for (final entry in db.state.overlay.addedNodes.entries) {
       final v = entry.key;
       if (!db.state.isNodeVisible(Vid(v))) continue;
-      final labelId = entry.value.labelIds.isEmpty ? 0 : entry.value.labelIds.first;
-      final label = db.state.strings.labelOf(labelId) ?? 'Node';
+      final labels = [
+        for (final id in entry.value.labelIds)
+          db.state.strings.labelOf(id) ?? '',
+      ]..removeWhere((l) => l.isEmpty);
       imports.add(ImportNode(
         logicalId: entry.value.logicalId,
-        label: label,
+        labels: labels.isEmpty ? const ['Node'] : labels,
         properties: _collectProps(db.state.nodeProps, v),
       ));
     }
@@ -221,6 +266,17 @@ class SyncEngine {
     }
     await target.client.bulkImport(Stream.fromIterable(imports));
     target.seeded = true;
+  }
+
+  /// Materialises the multi-label set for [vid] as a sorted list of
+  /// label names. Used by the sync seeding loop.
+  List<String> _labelsForVid(Vid vid) {
+    final out = <String>[
+      for (final id in db.state.effectiveLabelsOf(vid))
+        db.state.strings.labelOf(id) ?? '',
+    ]..removeWhere((l) => l.isEmpty);
+    out.sort();
+    return out.isEmpty ? const ['Node'] : out;
   }
 
   Map<String, PropValue> _namedProps(
@@ -260,12 +316,12 @@ class SyncEngine {
     final op = seq.op;
     switch (op) {
       case AddNode(:final logicalId, :final labelIds, :final props):
-        final labelName = labelIds.isEmpty
-            ? 'Node'
-            : (state.strings.labelOf(labelIds.first) ?? 'Node');
+        final labels = <String>[
+          for (final id in labelIds) state.strings.labelOf(id) ?? '',
+        ]..removeWhere((l) => l.isEmpty);
         return ImportNode(
           logicalId: logicalId,
-          label: labelName,
+          labels: labels.isEmpty ? const ['Node'] : labels,
           properties: _namedProps(props, state),
         );
       case AddEdge(

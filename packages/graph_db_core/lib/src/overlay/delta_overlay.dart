@@ -67,11 +67,12 @@ class AddedEdge {
   });
 }
 
-/// v1 is single-label per node (multi-label is a a future refinement
-///). Label transitions on pre-existing CSR nodes are
-/// represented as a flat `vid -> labelId` override map on the overlay.
-/// Reads consult the override first; `null` falls back to
-/// `csr.labelOf[vid]`.
+/// Label transitions on pre-existing CSR nodes are represented as a
+/// `vid -> Set<labelId>` override map on the overlay. The set is the
+/// **full new label set** for the vid — readers consult the override
+/// first (set membership tests); a missing entry falls back to the
+/// CSR's ragged labels for that vid. Newly added nodes track their
+/// labels in [AddedNode.labelIds] directly.
 
 /// The single-segment delta overlay.
 ///
@@ -82,9 +83,10 @@ class AddedEdge {
 ///   time, but the overlay does not enforce — the allocator does).
 /// - [addedEdges]: keyed by eid.
 /// - [deletedNodes] / [deletedEdges]: sets of vids/eids to hide.
-/// - [labelDelta]: keyed by vid; only used for pre-existing CSR nodes
-///   (newly added nodes have their labels in [AddedNode.labelIds]
-///   directly).
+/// - [labelOverride]: keyed by vid; only used for pre-existing CSR
+///   nodes (newly added nodes have their labels in
+///   [AddedNode.labelIds] directly). The value is the full new label
+///   set after applying any `SetNodeLabels` op.
 class DeltaOverlay {
   final Map<int, EdgeDelta> outDelta = {};
   final Map<int, EdgeDelta> inDelta = {};
@@ -92,7 +94,7 @@ class DeltaOverlay {
   final Map<int, AddedEdge> addedEdges = {};
   final Set<int> deletedNodes = {};
   final Set<int> deletedEdges = {};
-  final Map<int, int> labelOverride = {};
+  final Map<int, Set<int>> labelOverride = {};
 
   EdgeDelta _outFor(int vid) => outDelta.putIfAbsent(vid, EdgeDelta.new);
   EdgeDelta _inFor(int vid) => inDelta.putIfAbsent(vid, EdgeDelta.new);
@@ -134,12 +136,12 @@ class DeltaOverlay {
     inDelta.remove(vid);
   }
 
-  /// Sets the effective label for [vid] (v1 single-label semantics).
-  /// For overlay-added nodes the caller should mutate
+  /// Replaces the effective label set for [vid] with [labelIds]. For
+  /// overlay-added nodes the caller should mutate
   /// [AddedNode.labelIds] in-place instead — that's the authoritative
-  /// store for new nodes.
-  void recordSetNodeLabel(int vid, int labelId) {
-    labelOverride[vid] = labelId;
+  /// store for new nodes. Pre-existing CSR nodes land here.
+  void recordSetNodeLabels(int vid, Set<int> labelIds) {
+    labelOverride[vid] = labelIds;
   }
 
   bool isNodeDeleted(int vid) => deletedNodes.contains(vid);

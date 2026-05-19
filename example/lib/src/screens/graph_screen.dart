@@ -141,7 +141,7 @@ class _NodeWidget extends StatelessWidget {
   Widget build(BuildContext context) {
     final db = sg.db;
     final scheme = Theme.of(context).colorScheme;
-    final isPerson = db.labelOf(vid) == sg.personLabel;
+    final isPerson = db.hasLabel(vid, sg.personLabel);
     final name = db.getNodeStringProp(vid, sg.nameKey);
 
     if (isPerson) {

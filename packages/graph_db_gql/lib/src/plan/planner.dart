@@ -11,6 +11,7 @@ library;
 import 'package:graph_db_core/graph_db_core.dart';
 
 import '../ast.dart';
+import '../diagnostics/planner_diagnostic.dart';
 import 'logical_plan.dart';
 
 class PlannerException implements Exception {
@@ -22,7 +23,17 @@ class PlannerException implements Exception {
 
 class GqlPlanner {
   final GraphDb db;
-  GqlPlanner(this.db);
+
+  /// Optional non-fatal diagnostic sink. `null` ⇒ diagnostics are
+  /// silently dropped (the planner still runs).
+  final PlannerDiagnosticListener? onDiagnostic;
+
+  GqlPlanner(this.db, {this.onDiagnostic});
+
+  void _emit(PlannerDiagnostic d) {
+    final l = onDiagnostic;
+    if (l != null) l(d);
+  }
 
   LogicalPlan plan(GqlStatement stmt) {
     switch (stmt) {
@@ -46,6 +57,22 @@ class GqlPlanner {
     }
     final part = m.patterns.single;
     final start = part.start;
+
+    // Collect node-typed aliases so the `node.label` deprecation
+    // diagnostic can fire when they're accessed via `.label`.
+    final nodeAliases = <String>{};
+    if (start.alias != null) nodeAliases.add(start.alias!);
+    for (final n in part.nodes) {
+      if (n.alias != null) nodeAliases.add(n.alias!);
+    }
+    if (m.where != null) {
+      _scanForDeprecatedLabelAccess(m.where!, nodeAliases);
+    }
+    if (m.returnClause != null) {
+      for (final item in m.returnClause!.items) {
+        _scanForDeprecatedLabelAccess(item.expr, nodeAliases);
+      }
+    }
     if (start.alias == null) {
       throw PlannerException(
         'starting node pattern must be aliased — e.g. (n:Label)',
@@ -53,7 +80,7 @@ class GqlPlanner {
     }
     LogicalPlan plan = NodeScan(
       alias: start.alias!,
-      labelId: _resolveLabel(start.labels),
+      labelIds: _resolveLabels(start.labels),
     );
     // Inline property predicates on the start node.
     plan = _attachInlineProps(plan, start.alias!, start.properties);
@@ -245,17 +272,67 @@ class GqlPlanner {
     }
   }
 
-  int? _resolveLabel(List<String> labels) {
-    if (labels.isEmpty) return null;
-    // v1 single-label storage — first label wins.
-    final id = db.state.strings.labelIdOf(labels.first);
-    if (id == null) {
-      throw PlannerException(
-        'unknown label "${labels.first}" — intern it first or check '
-        'the spelling',
-      );
+  /// Walks [e] and fires a `PlannerDiagnostic.warning` for every
+  /// `<nodeAlias>.label` access — deprecated in the multi-label
+  /// rollout (§19.9). A node carries a *set* of labels now; the old
+  /// scalar `.label` access still parses but compares like
+  /// `[List<String>] == 'Person'` which silently evaluates to false.
+  /// The diagnostic makes the break loud at plan time. Suggested
+  /// rewrite: `labels(<alias>)` (returns a sorted list) or
+  /// `'Person' IN labels(<alias>)` for membership tests.
+  void _scanForDeprecatedLabelAccess(Expression e, Set<String> nodeAliases) {
+    switch (e) {
+      case PropertyAccessExpr(:final target, :final key):
+        if (key == 'label' &&
+            target is IdentifierExpr &&
+            nodeAliases.contains(target.name)) {
+          _emit(PlannerDiagnostic(
+            severity: PlannerDiagnosticSeverity.warning,
+            message:
+                'access of `${target.name}.label` is deprecated — nodes '
+                'now carry a set of labels (multi-label rollout)',
+            hint: 'use `labels(${target.name})` (sorted list) or '
+                "`'Person' IN labels(${target.name})` for membership",
+          ));
+        }
+        _scanForDeprecatedLabelAccess(target, nodeAliases);
+      case BinaryOpExpr(:final left, :final right):
+        _scanForDeprecatedLabelAccess(left, nodeAliases);
+        _scanForDeprecatedLabelAccess(right, nodeAliases);
+      case UnaryOpExpr(:final operand):
+        _scanForDeprecatedLabelAccess(operand, nodeAliases);
+      case FunctionCallExpr(:final arguments):
+        for (final a in arguments) {
+          _scanForDeprecatedLabelAccess(a, nodeAliases);
+        }
+      case AggregateExpr(:final argument):
+        if (argument != null) {
+          _scanForDeprecatedLabelAccess(argument, nodeAliases);
+        }
+      case IdentifierExpr():
+      case LiteralExpr():
+      case ParameterExpr():
+        return;
     }
-    return id;
+  }
+
+  /// Resolves every label name in [labels] to its interned id.
+  /// `(:A:B)` patterns become a list with AND-semantics at execution
+  /// time. Returns `null` for an empty list (full scan).
+  List<int>? _resolveLabels(List<String> labels) {
+    if (labels.isEmpty) return null;
+    final out = <int>[];
+    for (final name in labels) {
+      final id = db.state.strings.labelIdOf(name);
+      if (id == null) {
+        throw PlannerException(
+          'unknown label "$name" — intern it first or check the spelling',
+        );
+      }
+      out.add(id);
+    }
+    out.sort(); // deterministic intersection order
+    return out;
   }
 
   int? _resolveEdgeType(List<String> types) {
@@ -291,27 +368,42 @@ class GqlPlanner {
     return Filter(source: source, predicate: combined!);
   }
 
-  /// Synthesises a predicate for `(:Label)` constraints attached to
-  /// expanded nodes — the executor would otherwise have no way to
-  /// filter on label after the Expand. Implemented as a pseudo
-  /// property `__label` accessed via a magic key the evaluator
-  /// recognises.
+  /// Synthesises a predicate for `(:Label[:Label2...])` constraints
+  /// attached to expanded nodes — the executor would otherwise have
+  /// no way to filter on label after the Expand. Each label becomes a
+  /// `labelId IN labels(alias)` test (sugared as
+  /// `__label_contains == labelId`), AND-combined.
   Expression _labelMatchPredicate(String alias, List<String> labels) {
-    // v1 single-label — the first label is enforced; secondary labels
-    // accepted by the parser are ignored.
-    final labelId = db.state.strings.labelIdOf(labels.first);
-    if (labelId == null) {
-      throw PlannerException(
-        'unknown label "${labels.first}" on expanded node — intern '
-        'it first',
+    Expression? combined;
+    for (final name in labels) {
+      final labelId = db.state.strings.labelIdOf(name);
+      if (labelId == null) {
+        throw PlannerException(
+          'unknown label "$name" on expanded node — intern it first',
+        );
+      }
+      // `__label_contains(<alias>) == labelId` — the evaluator returns
+      // true iff the alias's vid effectively carries `labelId`.
+      final pred = BinaryOpExpr(
+        BinaryOp.eq,
+        PropertyAccessExpr(
+          IdentifierExpr(alias),
+          _internalLabelContainsKey(labelId),
+        ),
+        LiteralExpr(true),
       );
+      combined = combined == null
+          ? pred
+          : BinaryOpExpr(BinaryOp.and, combined, pred);
     }
-    return BinaryOpExpr(
-      BinaryOp.eq,
-      PropertyAccessExpr(IdentifierExpr(alias), _kInternalLabelKey),
-      LiteralExpr(labelId),
-    );
+    return combined!;
   }
+
+  /// Encodes a "vid carries this label-id?" probe inside the magic
+  /// `__label_contains:<id>` sentinel key. Cheap stringly-typed
+  /// trick avoids extending the `Expression` AST in PR 3.
+  String _internalLabelContainsKey(int labelId) =>
+      '$kInternalLabelContainsKeyPrefix$labelId';
 
   String _exprAsColumnName(Expression e, int index) {
     switch (e) {
@@ -343,10 +435,14 @@ class GqlPlanner {
   }
 }
 
-/// Magic property key recognised by [ExpressionEvaluator] as "the
-/// node's label id". Used by the planner to lower label constraints
-/// on expanded nodes into uniform predicate evaluation.
-const String _kInternalLabelKey = ' __label';
 
-/// Public re-export so the evaluator can see the same sentinel.
-const String kInternalLabelKey = _kInternalLabelKey;
+/// Magic property key recognised by [ExpressionEvaluator] as "the
+/// node's labels list" — multi-label rollout PR 3, returns a sorted
+/// `List<String>` (per §19.5 of the multi-label plan).
+const String kInternalLabelKey = ' __label';
+
+/// Sentinel-key *prefix* for the `__label_contains:<labelId>` probe.
+/// `_labelMatchPredicate` emits `PropertyAccessExpr` with this prefix
+/// + an interned label id; the evaluator recognises the prefix and
+/// returns `true` iff the bound vid effectively carries that label.
+const String kInternalLabelContainsKeyPrefix = ' __label_contains:';

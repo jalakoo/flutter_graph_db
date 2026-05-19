@@ -77,9 +77,9 @@ void main() {
 
     test('LRU evicts least-recently-used past maxEntries', () {
       final cache = GqlPlanCache(maxEntries: 2);
-      final p1 = NodeScan(alias: 'a', labelId: null) as LogicalPlan;
-      final p2 = NodeScan(alias: 'b', labelId: null) as LogicalPlan;
-      final p3 = NodeScan(alias: 'c', labelId: null) as LogicalPlan;
+      final p1 = NodeScan(alias: 'a', labelIds: null) as LogicalPlan;
+      final p2 = NodeScan(alias: 'b', labelIds: null) as LogicalPlan;
+      final p3 = NodeScan(alias: 'c', labelIds: null) as LogicalPlan;
       cache.put('q1', p1);
       cache.put('q2', p2);
       expect(cache.length, 2);

@@ -40,11 +40,29 @@ class Csr {
   final Uint32List edgeIdIn;
   final Uint32List edgeTypeIn;
 
-  // ----- Labels (single-label-per-node in v0; multi-label is a a future
-  // refinement) -------------------------------------------------
+  // ----- Labels -------------------------------------------------
+  //
+  // PR 1 of the multi-label rollout (`5_MULTILABEL_PLAN.md`) adds the
+  // ragged-CSR fields [labelRowPtr] + [labels] alongside the legacy
+  // single-label [labelOf]. While the engine still enforces one label
+  // per node (the single-label invariant is lifted in PR 2), the new
+  // accessors `hasLabel` / `labelsOf` are available on the read path
+  // so callers can migrate ahead of the applicator change. [labelOf]
+  // is removed in PR 2.
 
-  /// Length `nodeCount`. One label id per node.
+  /// Length `nodeCount`. One label id per node. **Transitional** —
+  /// equivalent to `labels[labelRowPtr[v]]` while the single-label
+  /// invariant holds. Removed in PR 2.
   final Uint32List labelOf;
+
+  /// Length `nodeCount + 1`. `labelRowPtr[v] .. labelRowPtr[v+1]`
+  /// indexes vid `v`'s labels inside [labels]. Each row is sorted
+  /// ascending so `hasLabel` is a binary search.
+  final Uint32List labelRowPtr;
+
+  /// Flat label-id stream, length `labelRowPtr.last`. Sorted ascending
+  /// within each row.
+  final Uint32List labels;
 
   /// Label id -> sorted vids carrying that label.
   final Map<int, Uint32List> labelIndex;
@@ -61,6 +79,8 @@ class Csr {
     required this.edgeIdIn,
     required this.edgeTypeIn,
     required this.labelOf,
+    required this.labelRowPtr,
+    required this.labels,
     required this.labelIndex,
   });
 
@@ -88,6 +108,14 @@ class Csr {
     required int labelCount,
     Uint32List? eids,
     Uint8List? nodeTombstones,
+    // Optional ragged-labels input. When both are present, they take
+    // precedence over [labelOf] for per-vid label storage and label
+    // index construction. [labelOf] is still required and is used by
+    // the (transitional) legacy field on the resulting Csr. Callers
+    // like the merge fold pass these to preserve multi-label rows
+    // that wouldn't fit in [labelOf]. Multi-label rollout PR 2.
+    Uint32List? labelRowPtr,
+    Uint32List? labels,
   }) {
     final edgeCount = srcs.length;
     if (dsts.length != edgeCount || edgeTypes.length != edgeCount) {
@@ -152,11 +180,41 @@ class Csr {
       cursorIn[d]++;
     }
 
-    // ----- label index (tombstoned vids are excluded)
+    // ----- ragged labels — either from the optional inputs or
+    // synthesised from single-label [labelOf].
+    final Uint32List effLabelRowPtr;
+    final Uint32List effLabels;
+    if (labelRowPtr != null && labels != null) {
+      if (labelRowPtr.length != nodeCount + 1) {
+        throw ArgumentError(
+            'labelRowPtr length ${labelRowPtr.length} != nodeCount+1 '
+            '(${nodeCount + 1})');
+      }
+      if (labels.length != labelRowPtr[nodeCount]) {
+        throw ArgumentError(
+            'labels length ${labels.length} != labelRowPtr.last '
+            '${labelRowPtr[nodeCount]}');
+      }
+      effLabelRowPtr = labelRowPtr;
+      effLabels = labels;
+    } else {
+      effLabelRowPtr = Uint32List(nodeCount + 1);
+      for (var v = 0; v < nodeCount; v++) {
+        effLabelRowPtr[v + 1] = v + 1;
+      }
+      effLabels = Uint32List.fromList(labelOf);
+    }
+
+    // ----- label index (tombstoned vids are excluded). Built from
+    // the ragged form so multi-label vids land in every bucket.
     final counts = Uint32List(labelCount);
     for (var v = 0; v < nodeCount; v++) {
       if (nodeTombstones != null && nodeTombstones[v] != 0) continue;
-      counts[labelOf[v]]++;
+      final end = effLabelRowPtr[v + 1];
+      for (var i = effLabelRowPtr[v]; i < end; i++) {
+        final l = effLabels[i];
+        if (l < labelCount) counts[l]++;
+      }
     }
     final labelIndex = <int, Uint32List>{};
     for (var l = 0; l < labelCount; l++) {
@@ -165,8 +223,11 @@ class Csr {
     final fill = Uint32List(labelCount);
     for (var v = 0; v < nodeCount; v++) {
       if (nodeTombstones != null && nodeTombstones[v] != 0) continue;
-      final l = labelOf[v];
-      labelIndex[l]![fill[l]++] = v;
+      final end = effLabelRowPtr[v + 1];
+      for (var i = effLabelRowPtr[v]; i < end; i++) {
+        final l = effLabels[i];
+        if (l < labelCount) labelIndex[l]![fill[l]++] = v;
+      }
     }
 
     return Csr(
@@ -181,9 +242,36 @@ class Csr {
       edgeIdIn: edgeIdIn,
       edgeTypeIn: edgeTypeIn,
       labelOf: labelOf,
+      labelRowPtr: effLabelRowPtr,
+      labels: effLabels,
       labelIndex: labelIndex,
     );
   }
+
+  /// Number of labels carried by [vid].
+  int labelCountOf(int vid) => labelRowPtr[vid + 1] - labelRowPtr[vid];
+
+  /// True iff [vid] carries [labelId]. O(log k) where k is per-vid
+  /// label count (typically 1–4). Allocation-free.
+  bool hasLabel(int vid, int labelId) {
+    var l = labelRowPtr[vid];
+    var r = labelRowPtr[vid + 1];
+    while (l < r) {
+      final m = (l + r) >>> 1;
+      final v = labels[m];
+      if (v == labelId) return true;
+      if (v < labelId) {
+        l = m + 1;
+      } else {
+        r = m;
+      }
+    }
+    return false;
+  }
+
+  /// Zero-copy view over [vid]'s label-id row. Do not mutate.
+  Uint32List labelsOf(int vid) =>
+      Uint32List.sublistView(labels, labelRowPtr[vid], labelRowPtr[vid + 1]);
 
   /// Out-degree of [vid].
   int outDegree(int vid) => rowPtrOut[vid + 1] - rowPtrOut[vid];
@@ -194,9 +282,13 @@ class Csr {
   /// Total bytes occupied by the topology arrays.
   ///
   /// Counts `rowPtr` + `colIdx` + `edgeId` + `edgeType` (both directions)
-  /// + `labelOf` + the per-label `labelIndex` arrays. Each `Uint32List`
-  /// slot is 4 bytes. Used by the secondary-index registry to compute
-  /// the 25-percent soft warning ratio.
+  /// + ragged labels (`labelRowPtr` + `labels`) + the per-label
+  /// `labelIndex` arrays. Each `Uint32List` slot is 4 bytes. Used by
+  /// the secondary-index registry to compute the 25-percent soft
+  /// warning ratio. PR 1 keeps the legacy [labelOf] field in storage
+  /// too; it shares slot count with [labels] under the single-label
+  /// invariant and is excluded from the size accounting to avoid
+  /// double-counting.
   int get sizeBytes {
     var labelIndexSlots = 0;
     for (final arr in labelIndex.values) {
@@ -211,7 +303,8 @@ class Csr {
             colIdxIn.length +
             edgeIdIn.length +
             edgeTypeIn.length +
-            labelOf.length +
+            labelRowPtr.length +
+            labels.length +
             labelIndexSlots);
   }
 }

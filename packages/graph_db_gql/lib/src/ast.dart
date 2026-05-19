@@ -273,10 +273,10 @@ class OrderByItem {
 
 /// Built-in scalar function call.
 ///
-/// v1 ships `size()`, `length()`, `coalesce()`. Aggregations are
-/// represented by the separate [AggregateExpr] — different planning +
-/// execution path.
-enum BuiltinFn { size, length, coalesce }
+/// v1 ships `size()`, `length()`, `coalesce()`, `labels()`.
+/// Aggregations are represented by the separate [AggregateExpr] —
+/// different planning + execution path.
+enum BuiltinFn { size, length, coalesce, labels }
 
 class FunctionCallExpr extends Expression {
   final BuiltinFn fn;

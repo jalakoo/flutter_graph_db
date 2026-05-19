@@ -210,4 +210,53 @@ void main() {
       expect(db.state.overlay.isEmpty, isTrue);
     });
   });
+
+  // ----- Multi-label rollout PR 2: ragged-CSR fold -----
+  group('multi-label fold (PR 2)', () {
+    test('overlay-added node with 3 labels lands in every label bucket',
+        () async {
+      final db = GraphDb.fromState(_baseline()..mergeThreshold = 1);
+      final a = db.internLabel('A');
+      final b = db.internLabel('B');
+      final c = db.internLabel('C');
+      late Vid v;
+      await db.runTransaction((txn) {
+        v = txn.addNode(labelIds: [a, b, c]);
+        txn.addEdge(src: const Vid(0), dst: v, typeId: 0);
+      });
+      expect(db.state.overlay.isEmpty, isTrue);
+      expect(db.state.csr.labelIndex[a], contains(v.value));
+      expect(db.state.csr.labelIndex[b], contains(v.value));
+      expect(db.state.csr.labelIndex[c], contains(v.value));
+      expect(db.state.csr.hasLabel(v.value, a), isTrue);
+      expect(db.state.csr.hasLabel(v.value, b), isTrue);
+      expect(db.state.csr.hasLabel(v.value, c), isTrue);
+      // Ragged labels round-trip — sorted ascending.
+      expect(
+        db.state.csr.labelsOf(v.value).toList(),
+        orderedEquals(<int>[a, b, c]..sort()),
+      );
+    });
+
+    test('label-override (existing CSR vid) lands in fresh buckets',
+        () async {
+      final db = GraphDb.fromState(_baseline()..mergeThreshold = 1);
+      final extra = db.internLabel('Vip');
+      // vid 0 starts with label 0 in the baseline fixture. Add an
+      // extra label and force a merge.
+      await db.runTransaction((txn) {
+        txn.setNodeLabels(const Vid(0), added: [extra], removed: const []);
+        // Force a merge via an unrelated edge addition.
+        final v = txn.addNode(labelIds: [0]);
+        txn.addEdge(src: const Vid(0), dst: v, typeId: 0);
+      });
+      expect(db.state.overlay.isEmpty, isTrue);
+      // vid 0 should appear in both its original label-0 bucket AND
+      // the new 'extra' bucket.
+      expect(db.state.csr.labelIndex[0], contains(0));
+      expect(db.state.csr.labelIndex[extra], contains(0));
+      expect(db.state.csr.hasLabel(0, 0), isTrue);
+      expect(db.state.csr.hasLabel(0, extra), isTrue);
+    });
+  });
 }

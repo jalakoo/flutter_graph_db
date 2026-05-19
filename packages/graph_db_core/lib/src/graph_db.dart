@@ -143,7 +143,15 @@ class GraphDb {
   int get edgeCount => _state.csr.edgeCount;
   int outDegree(Vid vid) => _state.csr.outDegree(vid.value);
   int inDegree(Vid vid) => _state.csr.inDegree(vid.value);
-  int labelOf(Vid vid) => _state.csr.labelOf[vid.value];
+
+  /// True iff [vid] carries [labelId]. Overlay-aware. Allocation-free
+  /// O(log k) where k is per-vid label count.
+  bool hasLabel(Vid vid, int labelId) =>
+      _state.hasLabelEffective(vid, labelId);
+
+  /// Full label-id set carried by [vid]. Overlay-aware. The returned
+  /// iterable is a view — do not mutate.
+  Iterable<int> labelsOf(Vid vid) => _state.effectiveLabelsOf(vid);
 
   // ------------------------------------------------------------- traversal
   // Primitive range API — allocation-free, fastest on AOT.

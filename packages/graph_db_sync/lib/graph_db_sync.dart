@@ -2,6 +2,7 @@
 /// ships transactions to configured `RemoteGraphClient`s.
 library;
 
-export 'src/sync_engine.dart' show SyncEngine, SyncRunReport;
+export 'src/sync_engine.dart'
+    show SyncEngine, SyncRunReport, SyncException, kDefaultUnlabeledFallback;
 export 'src/sync_target.dart'
     show QuarantinedOp, SeedingMode, SyncTarget;

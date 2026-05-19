@@ -62,7 +62,7 @@ void main() {
         props: const {},
       );
       expect(s.isNodeVisible(v), isTrue);
-      expect(s.effectiveLabelOf(v), 0);
+      expect(s.hasLabelEffective(v, 0), isTrue);
       expect(s.overlay.addedNodes.containsKey(v.value), isTrue);
     });
 
@@ -124,17 +124,31 @@ void main() {
       );
     });
 
-    test('AddNode with multi-label rejects (v1 single-label)', () {
+    test('AddNode with multi-label is accepted; both labels reachable', () {
       final s = _baseline();
-      expect(
-        () => s.applyAddNode(
-          s.allocVid(),
-          logicalId: 'x',
-          labelIds: const [0, 0],
-          props: const {},
-        ),
-        throwsA(isA<ConstraintViolation>()),
+      final v = s.allocVid();
+      // Two distinct labels — 0 and 1 (Person and Company in the fixture).
+      s.applyAddNode(
+        v,
+        logicalId: 'x',
+        labelIds: const [0, 1],
+        props: const {},
       );
+      expect(s.hasLabelEffective(v, 0), isTrue);
+      expect(s.hasLabelEffective(v, 1), isTrue);
+      expect(s.effectiveLabelsOf(v).toList()..sort(), [0, 1]);
+    });
+
+    test('AddNode dedupes duplicate label ids', () {
+      final s = _baseline();
+      final v = s.allocVid();
+      s.applyAddNode(
+        v,
+        logicalId: 'y',
+        labelIds: const [0, 0],
+        props: const {},
+      );
+      expect(s.effectiveLabelsOf(v).length, 1);
     });
   });
 
@@ -308,7 +322,8 @@ void main() {
         added: [newLabel],
         removed: const [0],
       );
-      expect(s.effectiveLabelOf(const Vid(0)), newLabel);
+      expect(s.hasLabelEffective(const Vid(0), newLabel), isTrue);
+      expect(s.hasLabelEffective(const Vid(0), 0), isFalse);
     });
 
     test('relabels an overlay-added node in place', () {
@@ -317,19 +332,66 @@ void main() {
       s.applyAddNode(v, logicalId: 'x', labelIds: [0], props: const {});
       final newLabel = s.strings.internLabel('Vip');
       s.applySetNodeLabels(v, added: [newLabel], removed: const [0]);
-      expect(s.effectiveLabelOf(v), newLabel);
+      expect(s.hasLabelEffective(v, newLabel), isTrue);
+      expect(s.hasLabelEffective(v, 0), isFalse);
     });
 
-    test('multi-label rejected (v1)', () {
+    test('multi-label add: vid carries both old and new labels', () {
+      final s = _baseline();
+      // vid 0 starts as label 0; add label 1 without removing 0.
+      s.applySetNodeLabels(
+        const Vid(0),
+        added: const [1],
+        removed: const [],
+      );
+      expect(s.hasLabelEffective(const Vid(0), 0), isTrue);
+      expect(s.hasLabelEffective(const Vid(0), 1), isTrue);
+      expect(s.effectiveLabelsOf(const Vid(0)).toList()..sort(), [0, 1]);
+    });
+
+    test('intersecting added + removed throws', () {
       final s = _baseline();
       expect(
         () => s.applySetNodeLabels(
           const Vid(0),
-          added: const [0, 1],
-          removed: const [],
+          added: const [0],
+          removed: const [0],
         ),
         throwsA(isA<ConstraintViolation>()),
       );
+    });
+
+    test('emptying the label set throws', () {
+      final s = _baseline();
+      expect(
+        () => s.applySetNodeLabels(
+          const Vid(0),
+          added: const [],
+          removed: const [0],
+        ),
+        throwsA(isA<ConstraintViolation>()),
+      );
+    });
+
+    test('idempotent: re-adding an existing label is a no-op', () {
+      final s = _baseline();
+      s.applySetNodeLabels(
+        const Vid(0),
+        added: const [0],
+        removed: const [],
+      );
+      expect(s.effectiveLabelsOf(const Vid(0)).toList(), [0]);
+    });
+
+    test('idempotent: removing an absent label is a no-op', () {
+      final s = _baseline();
+      final unknown = s.strings.internLabel('NotOnNode');
+      s.applySetNodeLabels(
+        const Vid(0),
+        added: const [],
+        removed: [unknown],
+      );
+      expect(s.effectiveLabelsOf(const Vid(0)).toList(), [0]);
     });
   });
 

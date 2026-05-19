@@ -149,39 +149,8 @@ class GqlExecutor {
 
   Stream<ResultRow> _runScan(NodeScan scan) async* {
     final state = db.state;
-    if (scan.labelId != null) {
-      final base = state.csr.labelIndex[scan.labelId!];
-      if (base != null) {
-        for (final v in base) {
-          if (!state.overlay.deletedNodes.contains(v)) {
-            yield ResultRow({scan.alias: Vid(v)});
-          }
-        }
-      }
-      // Also overlay-added nodes whose first label matches.
-      for (final entry in state.overlay.addedNodes.entries) {
-        if (entry.value.labelIds.isNotEmpty &&
-            entry.value.labelIds.first == scan.labelId) {
-          yield ResultRow({scan.alias: Vid(entry.key)});
-        }
-      }
-      // Label-override nodes that gained the label after a SetNodeLabels.
-      for (final entry in state.overlay.labelOverride.entries) {
-        if (entry.value == scan.labelId) {
-          // Skip if already yielded from base (it had the label before
-          // the override) — covered by the base scan above only if
-          // the previous label was the same; otherwise the override
-          // adds it now.
-          if (entry.key < state.csr.nodeCount &&
-              state.csr.labelOf[entry.key] == scan.labelId) {
-            continue;
-          }
-          if (!state.overlay.deletedNodes.contains(entry.key)) {
-            yield ResultRow({scan.alias: Vid(entry.key)});
-          }
-        }
-      }
-    } else {
+    final labelIds = scan.labelIds;
+    if (labelIds == null || labelIds.isEmpty) {
       // Full scan — every visible node.
       for (var v = 0; v < state.csr.nodeCount; v++) {
         if (!state.overlay.deletedNodes.contains(v)) {
@@ -193,6 +162,69 @@ class GqlExecutor {
           yield ResultRow({scan.alias: Vid(v)});
         }
       }
+      return;
+    }
+
+    // Multi-label AND scan. Pick the smallest CSR label index as the
+    // seed for the intersection, then filter the rest via
+    // `state.hasLabelEffective`. Also merge in overlay-added /
+    // label-override vids whose effective sets contain every label.
+    var seedLabel = labelIds.first;
+    var seedSize = state.csr.labelIndex[seedLabel]?.length ?? 0;
+    for (var i = 1; i < labelIds.length; i++) {
+      final size = state.csr.labelIndex[labelIds[i]]?.length ?? 0;
+      if (size < seedSize) {
+        seedLabel = labelIds[i];
+        seedSize = size;
+      }
+    }
+    final yielded = <int>{};
+    final base = state.csr.labelIndex[seedLabel];
+    if (base != null) {
+      outer:
+      for (final v in base) {
+        if (state.overlay.deletedNodes.contains(v)) continue;
+        // Honour overlay label-override — when present, defer to it
+        // entirely (it may have removed [seedLabel]).
+        final override = state.overlay.labelOverride[v];
+        if (override != null) {
+          for (final l in labelIds) {
+            if (!override.contains(l)) continue outer;
+          }
+        } else {
+          for (final l in labelIds) {
+            if (l == seedLabel) continue; // already known
+            if (!state.csr.hasLabel(v, l)) continue outer;
+          }
+        }
+        yielded.add(v);
+        yield ResultRow({scan.alias: Vid(v)});
+      }
+    }
+    // Overlay-added nodes whose set contains every required label.
+    outerAdded:
+    for (final entry in state.overlay.addedNodes.entries) {
+      final vid = entry.key;
+      if (state.overlay.deletedNodes.contains(vid)) continue;
+      if (yielded.contains(vid)) continue;
+      for (final l in labelIds) {
+        if (!entry.value.labelIds.contains(l)) continue outerAdded;
+      }
+      yielded.add(vid);
+      yield ResultRow({scan.alias: Vid(vid)});
+    }
+    // Pre-existing CSR vids that *gained* the full label set via a
+    // label-override (and weren't already yielded by the seed scan).
+    outerOv:
+    for (final entry in state.overlay.labelOverride.entries) {
+      final vid = entry.key;
+      if (state.overlay.deletedNodes.contains(vid)) continue;
+      if (yielded.contains(vid)) continue;
+      for (final l in labelIds) {
+        if (!entry.value.contains(l)) continue outerOv;
+      }
+      yielded.add(vid);
+      yield ResultRow({scan.alias: Vid(vid)});
     }
   }
 

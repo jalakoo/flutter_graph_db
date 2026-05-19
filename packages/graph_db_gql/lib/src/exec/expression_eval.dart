@@ -9,7 +9,8 @@ library;
 import 'package:graph_db_core/graph_db_core.dart';
 
 import '../ast.dart';
-import '../plan/planner.dart' show kInternalLabelKey;
+import '../plan/planner.dart'
+    show kInternalLabelKey, kInternalLabelContainsKeyPrefix;
 import 'result_row.dart';
 
 class EvalException implements Exception {
@@ -90,14 +91,50 @@ class ExpressionEvaluator {
           if (v != null) return v;
         }
         return null;
+      case BuiltinFn.labels:
+        // Cypher `labels(n)` — returns sorted-ascending list of label
+        // names. Per §19.5 of the multi-label plan: UTF-16 code-unit
+        // order via Dart's String.compareTo (locale-independent).
+        if (args.length != 1) {
+          throw EvalException(
+              'labels() expects 1 argument, got ${args.length}');
+        }
+        final v = eval(args.single, row);
+        if (v is! Vid) {
+          throw EvalException(
+              'labels() expects a node, got ${v.runtimeType}');
+        }
+        final out = <String>[
+          for (final id in _db.state.effectiveLabelsOf(v))
+            _db.state.strings.labelOf(id) ?? '',
+        ]..sort();
+        return out;
     }
   }
 
   Object? _propertyOf(Object? base, String key) {
     // Special sentinel keys recognised regardless of the base type.
     if (key == kInternalLabelKey) {
-      if (base is Vid) return _db.state.effectiveLabelOf(base);
+      if (base is Vid) {
+        // Multi-label rollout PR 3: returns the labels list sorted
+        // ascending by string (per §19.5 — UTF-16 code-unit order via
+        // Dart's String.compareTo).
+        final ids = _db.state.effectiveLabelsOf(base);
+        return [
+          for (final id in ids) _db.state.strings.labelOf(id) ?? '',
+        ]..sort();
+      }
       throw EvalException('label predicate on non-node value');
+    }
+    if (key.startsWith(kInternalLabelContainsKeyPrefix)) {
+      // Internal probe — `__label_contains:<labelId>` → bool.
+      if (base is! Vid) {
+        throw EvalException('label-contains probe on non-node value');
+      }
+      final labelId = int.parse(
+        key.substring(kInternalLabelContainsKeyPrefix.length),
+      );
+      return _db.state.hasLabelEffective(base, labelId);
     }
     if (base == null) return null;
     final keyId = _db.state.strings.propKeyIdOf(key);

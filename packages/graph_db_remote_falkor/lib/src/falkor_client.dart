@@ -220,8 +220,13 @@ class FalkorClient implements RemoteGraphClient {
     var edges = 0;
     await for (final op in ops) {
       if (op is ImportNode) {
+        // Multi-label `CREATE (n:A:B:C {props})` — backtick-escape
+        // each label name to defang injection.
+        final labelClause = op.labels
+            .map((l) => ':`${l.replaceAll('`', '``')}`')
+            .join();
         await executeQuery(
-          'CREATE (n:${op.label} {props})',
+          'CREATE (n$labelClause {props})',
           {'props': op.properties.map((k, v) => MapEntry(k, _unbox(v)))},
         );
         nodes++;

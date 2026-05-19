@@ -16,9 +16,13 @@ abstract interface class GraphNode {
   /// UUIDv7 by default.
   String get logicalId;
 
-  /// Single-label storage v1. Multi-label promotion is
-  /// a future; for now the boundary returns one label.
-  String? get label;
+  /// Multi-label as of the multi-label rollout. Sorted ascending by
+  /// string (UTF-16 code-unit order) for stable cross-adapter
+  /// comparison. May be empty for backends that allow label-less
+  /// nodes; the sync engine substitutes `unlabeled_node` on import
+  /// (see `SyncEngine.unlabeledFallback`) so the local engine's
+  /// non-empty invariant is preserved.
+  List<String> get labels;
 
   Map<String, PropValue> get properties;
 }
@@ -62,7 +66,7 @@ class RemoteNode implements GraphNode {
   @override
   final String logicalId;
   @override
-  final String? label;
+  final List<String> labels;
   @override
   final Map<String, PropValue> properties;
 
@@ -74,7 +78,7 @@ class RemoteNode implements GraphNode {
 
   const RemoteNode({
     required this.logicalId,
-    required this.label,
+    required this.labels,
     required this.properties,
     this.remoteId,
   });

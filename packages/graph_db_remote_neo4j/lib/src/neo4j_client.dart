@@ -186,8 +186,12 @@ class Neo4jClient implements RemoteGraphClient {
     var edges = 0;
     await for (final op in ops) {
       if (op is ImportNode) {
+        // Multi-label `CREATE (n:A:B:C $p)` — backtick-escape every
+        // label name to defang injection (same rule as the historic
+        // single-label path).
+        final labelClause = op.labels.map((l) => ':`${_escapeBacktick(l)}`').join();
         await executeQuery(
-          'CREATE (n:${op.label} \$p)',
+          'CREATE (n$labelClause \$p)',
           {'p': _propMapToCypher(op.properties)},
         );
         nodes++;
@@ -261,7 +265,7 @@ class Neo4jClient implements RemoteGraphClient {
           final props = (v.fields[2] as Map).cast<String, Object?>();
           return RemoteNode(
             logicalId: (props['logicalId'] as String?) ?? '$id',
-            label: labels.isEmpty ? null : labels.first,
+            labels: List<String>.of(labels)..sort(),
             properties: _propsToBoundary(props),
             remoteId: id.toString(),
           );
@@ -314,6 +318,10 @@ class Neo4jClient implements RemoteGraphClient {
     }
     return out;
   }
+
+  /// Escapes a backtick inside a label name so backtick-quoting in
+  /// generated Cypher (`:`A`B``) is injection-safe.
+  String _escapeBacktick(String s) => s.replaceAll('`', '``');
 
   /// Converts a PropValue map back to Cypher-friendly Dart for `$p`
   /// parameter binding on `bulkImport`.

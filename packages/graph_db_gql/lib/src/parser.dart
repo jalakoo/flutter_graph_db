@@ -605,6 +605,8 @@ class GqlParser {
         scalar = BuiltinFn.length;
       case 'COALESCE':
         scalar = BuiltinFn.coalesce;
+      case 'LABELS':
+        scalar = BuiltinFn.labels;
     }
     if (scalar != null) {
       final args = <Expression>[];
@@ -620,7 +622,7 @@ class GqlParser {
     }
     throw _error(
       'unknown function "$name" — v1 recognises COUNT / SUM / AVG / '
-      'MIN / MAX / COLLECT / SIZE / LENGTH / COALESCE',
+      'MIN / MAX / COLLECT / SIZE / LENGTH / COALESCE / LABELS',
       _peek(),
     );
   }
