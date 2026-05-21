@@ -101,4 +101,119 @@ void main() {
           reason: 'empty-overlay fast path must return the CSR view, no copy');
     });
   });
+
+  group('read-your-writes — traversal', () {
+    test('an edge committed via runTransaction is visible to forEach'
+        'Out/InNeighbor before any merge', () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      final rel = db.internEdgeType('rel');
+      late Vid a, b;
+      await db.runTransaction((txn) {
+        a = txn.addNode(labelIds: [label]);
+        b = txn.addNode(labelIds: [label]);
+        txn.addEdge(src: a, dst: b, typeId: rel);
+      });
+      final outs = <int>[];
+      db.forEachOutNeighbor(a, (dst, eid, t) => outs.add(dst.value));
+      expect(outs, contains(b.value));
+
+      final ins = <int>[];
+      db.forEachInNeighbor(b, (src, eid, t) => ins.add(src.value));
+      expect(ins, contains(a.value));
+    });
+
+    test('a removed base-CSR edge is not visited before any merge', () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      final rel = db.internEdgeType('rel');
+      late Vid a, b;
+      late Eid e;
+      await db.runTransaction((txn) {
+        a = txn.addNode(labelIds: [label]);
+        b = txn.addNode(labelIds: [label]);
+        e = txn.addEdge(src: a, dst: b, typeId: rel);
+      });
+      db.state.mergeNow(); // bake the edge into the CSR base
+      await db.runTransaction((txn) => txn.delEdge(e));
+      final outs = <int>[];
+      db.forEachOutNeighbor(a, (dst, eid, t) => outs.add(dst.value));
+      expect(outs, isNot(contains(b.value)),
+          reason: 'overlay tombstone must hide a base-CSR edge');
+    });
+
+    test('an edge to a deleted endpoint is not visited before any merge',
+        () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      final rel = db.internEdgeType('rel');
+      late Vid a, b;
+      await db.runTransaction((txn) {
+        a = txn.addNode(labelIds: [label]);
+        b = txn.addNode(labelIds: [label]);
+        txn.addEdge(src: a, dst: b, typeId: rel);
+      });
+      db.state.mergeNow();
+      await db.runTransaction((txn) => txn.delNode(b));
+      final outs = <int>[];
+      db.forEachOutNeighbor(a, (dst, eid, t) => outs.add(dst.value));
+      expect(outs, isNot(contains(b.value)));
+    });
+  });
+
+  group('read-your-writes — counts and degrees', () {
+    test('nodeCount / edgeCount reflect committed adds before any merge and '
+        'match the post-merge totals', () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      final rel = db.internEdgeType('rel');
+      await db.runTransaction((txn) {
+        final a = txn.addNode(labelIds: [label]);
+        final b = txn.addNode(labelIds: [label]);
+        final c = txn.addNode(labelIds: [label]);
+        txn.addEdge(src: a, dst: b, typeId: rel);
+        txn.addEdge(src: b, dst: c, typeId: rel);
+      });
+      expect(db.nodeCount, 3);
+      expect(db.edgeCount, 2);
+      final preNodes = db.nodeCount;
+      final preEdges = db.edgeCount;
+      db.state.mergeNow();
+      expect(db.nodeCount, preNodes, reason: 'nodeCount parity across merge');
+      expect(db.edgeCount, preEdges, reason: 'edgeCount parity across merge');
+    });
+
+    test('edgeCount drops when a base edge is removed before any merge',
+        () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      final rel = db.internEdgeType('rel');
+      late Eid e;
+      await db.runTransaction((txn) {
+        final a = txn.addNode(labelIds: [label]);
+        final b = txn.addNode(labelIds: [label]);
+        e = txn.addEdge(src: a, dst: b, typeId: rel);
+      });
+      db.state.mergeNow();
+      expect(db.edgeCount, 1);
+      await db.runTransaction((txn) => txn.delEdge(e));
+      expect(db.edgeCount, 0,
+          reason: 'an overlay tombstone must reduce edgeCount (RYW)');
+    });
+
+    test('outDegree / inDegree reflect overlay edges before any merge',
+        () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      final rel = db.internEdgeType('rel');
+      late Vid a, b;
+      await db.runTransaction((txn) {
+        a = txn.addNode(labelIds: [label]);
+        b = txn.addNode(labelIds: [label]);
+        txn.addEdge(src: a, dst: b, typeId: rel);
+      });
+      expect(db.outDegree(a), 1);
+      expect(db.inDegree(b), 1);
+    });
+  });
 }

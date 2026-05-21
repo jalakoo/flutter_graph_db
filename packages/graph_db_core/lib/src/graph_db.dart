@@ -130,19 +130,22 @@ class GraphDb {
 
   // -------------------------------------------------------------- topology
 
-  /// CSR-resident node count. **Read-your-writes:** recently
-  /// committed mutations land in the overlay first and aren't
-  /// reflected here until the next merge (automatic per
-  /// `mergeThreshold` or via explicit `db.state.mergeNow()`). Call
-  /// [mergeNow](MutableGraphState.mergeNow) after a mutation if you
-  /// need the count to include it immediately.
-  int get nodeCount => _state.csr.nodeCount;
+  /// Total node count. **Read-your-writes:** committed mutations are
+  /// reflected immediately — no `mergeNow()` required. Matches the
+  /// post-merge count exactly; deleted vids retain their slot (ids are
+  /// never reused), so this can exceed the number of live logical nodes.
+  int get nodeCount => _state.effectiveNodeCount;
 
-  /// CSR-resident edge count. Same read-your-writes caveat as
-  /// [nodeCount].
-  int get edgeCount => _state.csr.edgeCount;
-  int outDegree(Vid vid) => _state.csr.outDegree(vid.value);
-  int inDegree(Vid vid) => _state.csr.inDegree(vid.value);
+  /// Total edge count. Read-your-writes — committed adds and removals are
+  /// reflected immediately, with no `mergeNow()`.
+  int get edgeCount => _state.effectiveEdgeCount;
+
+  /// Out-degree of [vid]. Read-your-writes (overlay-aware): O(1) on a
+  /// clean overlay, O(degree) while writes are pending.
+  int outDegree(Vid vid) => _state.effectiveOutDegree(vid);
+
+  /// In-degree of [vid]. Read-your-writes — see [outDegree].
+  int inDegree(Vid vid) => _state.effectiveInDegree(vid);
 
   /// True iff [vid] carries [labelId]. Overlay-aware. Allocation-free
   /// O(log k) where k is per-vid label count.
@@ -170,37 +173,32 @@ class GraphDb {
 
   /// Callback sugar — invokes [visit] for each out-edge of [vid].
   ///
-  /// Hoist [visit] to a top-level function or a field-bound closure to
-  /// keep this path allocation-free.
+  /// **Read-your-writes** (overlay-aware): committed edges are visited
+  /// immediately, removed edges and edges to deleted nodes are skipped,
+  /// with no `mergeNow()`. The inner loop is allocation-free; this wrapper
+  /// allocates one adapter closure per call. For the strictly
+  /// allocation-free, snapshot-of-last-merge hot path use the primitive
+  /// range API ([outRangeStart] / [outRangeEnd] / [outNeighborAt]).
   void forEachOutNeighbor(
     Vid vid,
     void Function(Vid dst, Eid eid, int edgeType) visit,
   ) {
-    final csr = _state.csr;
-    final end = csr.rowPtrOut[vid.value + 1];
-    for (var i = csr.rowPtrOut[vid.value]; i < end; i++) {
-      visit(
-        Vid(csr.colIdxOut[i]),
-        Eid(csr.edgeIdOut[i]),
-        csr.edgeTypeOut[i],
-      );
-    }
+    _state.forEachOutEdge(
+      vid,
+      (eid, dst, edgeType) => visit(dst, eid, edgeType),
+    );
   }
 
   /// Callback sugar — invokes [visit] for each in-edge of [vid].
+  /// Read-your-writes (overlay-aware) — see [forEachOutNeighbor].
   void forEachInNeighbor(
     Vid vid,
     void Function(Vid src, Eid eid, int edgeType) visit,
   ) {
-    final csr = _state.csr;
-    final end = csr.rowPtrIn[vid.value + 1];
-    for (var i = csr.rowPtrIn[vid.value]; i < end; i++) {
-      visit(
-        Vid(csr.colIdxIn[i]),
-        Eid(csr.edgeIdIn[i]),
-        csr.edgeTypeIn[i],
-      );
-    }
+    _state.forEachInEdge(
+      vid,
+      (eid, src, edgeType) => visit(src, eid, edgeType),
+    );
   }
 
   // ---------------------------------------------------------------- labels

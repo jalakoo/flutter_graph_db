@@ -795,15 +795,49 @@ class MutableGraphState {
     }
   }
 
-  /// Out-degree with overlay applied. O(degree).
+  /// Total node-slot count including overlay-added nodes —
+  /// read-your-writes. Exactly matches the post-merge `csr.nodeCount`
+  /// (the same max formula `foldOverlayIntoCsr` uses). Deleted nodes
+  /// retain their vid slot here as they do across a merge. Fast path
+  /// returns `csr.nodeCount` when no nodes are pending.
+  int get effectiveNodeCount {
+    if (overlay.addedNodes.isEmpty) return csr.nodeCount;
+    var n = csr.nodeCount;
+    for (final vid in overlay.addedNodes.keys) {
+      if (vid + 1 > n) n = vid + 1;
+    }
+    return n;
+  }
+
+  /// Live edge count with the overlay applied — read-your-writes. Adds
+  /// overlay-added edges and subtracts hidden base edges. The per-vid
+  /// `removed` sets hold only base-CSR eids (an overlay-added edge that
+  /// gets deleted is pulled straight out of `addedEdges`), and
+  /// `applyDelNode` cascades incident edges into those sets, so this
+  /// matches the post-merge `csr.edgeCount` exactly. Fast path returns
+  /// `csr.edgeCount` on a clean overlay.
+  int get effectiveEdgeCount {
+    if (overlay.isEmpty) return csr.edgeCount;
+    var removed = 0;
+    for (final delta in overlay.outDelta.values) {
+      removed += delta.removed.length;
+    }
+    return csr.edgeCount - removed + overlay.addedEdges.length;
+  }
+
+  /// Out-degree with overlay applied (read-your-writes). O(degree) when
+  /// writes are pending; O(1) `csr.outDegree` fast path on a clean overlay.
   int effectiveOutDegree(Vid vid) {
+    if (overlay.isEmpty) return csr.outDegree(vid.value);
     var n = 0;
     forEachOutEdge(vid, (_, __, ___) => n++);
     return n;
   }
 
-  /// In-degree with overlay applied. O(degree).
+  /// In-degree with overlay applied (read-your-writes). O(degree) when
+  /// writes are pending; O(1) `csr.inDegree` fast path on a clean overlay.
   int effectiveInDegree(Vid vid) {
+    if (overlay.isEmpty) return csr.inDegree(vid.value);
     var n = 0;
     forEachInEdge(vid, (_, __, ___) => n++);
     return n;
