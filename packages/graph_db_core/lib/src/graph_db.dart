@@ -147,6 +147,14 @@ class GraphDb {
   /// In-degree of [vid]. Read-your-writes — see [outDegree].
   int inDegree(Vid vid) => _state.effectiveInDegree(vid);
 
+  /// True when committed mutations are sitting in the overlay, not yet
+  /// folded into the CSR. The read API is read-your-writes regardless, so
+  /// this is purely observability: it lets callers of the
+  /// snapshot-semantics primitive range API (see below) tell when the CSR
+  /// is stale relative to committed writes. Always `false` immediately
+  /// after `db.state.mergeNow()`.
+  bool get hasPendingWrites => !_state.overlay.isEmpty;
+
   /// True iff [vid] carries [labelId]. Overlay-aware. Allocation-free
   /// O(log k) where k is per-vid label count.
   bool hasLabel(Vid vid, int labelId) =>
@@ -158,6 +166,15 @@ class GraphDb {
 
   // ------------------------------------------------------------- traversal
   // Primitive range API — allocation-free, fastest on AOT.
+  //
+  // **Snapshot semantics — NOT read-your-writes.** These index directly
+  // into the CSR arrays, which reflect only the last merge; overlay-
+  // resident edges (committed but not yet folded into the CSR) are
+  // invisible here. This is the deliberate exception to the engine's
+  // read-your-writes contract — the price of the zero-allocation
+  // guarantee. For read-your-writes traversal use [forEachOutNeighbor] /
+  // [forEachInNeighbor], or call `db.state.mergeNow()` first.
+  // [hasPendingWrites] reports when the CSR is stale relative to writes.
 
   int outRangeStart(Vid vid) => _state.outStart(vid);
   int outRangeEnd(Vid vid) => _state.outEnd(vid);

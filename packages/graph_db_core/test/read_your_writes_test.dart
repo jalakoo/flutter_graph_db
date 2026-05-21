@@ -216,4 +216,53 @@ void main() {
       expect(db.inDegree(b), 1);
     });
   });
+
+  group('read-your-writes — properties and id stability', () {
+    test('a node property written in a txn is readable before any merge',
+        () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      final nameKey = db.internPropKey('name');
+      final ageKey = db.internPropKey('age');
+      late Vid vid;
+      await db.runTransaction((txn) {
+        vid = txn.addNode(labelIds: [label], props: {
+          nameKey: const PropString('Kai'),
+          ageKey: const PropInt(7),
+        });
+      });
+      expect(db.getNodeStringProp(vid, nameKey), 'Kai');
+      expect(db.getNodeIntProp(vid, ageKey), 7);
+    });
+
+    test('vids and property reads survive a mergeNow()', () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      final nameKey = db.internPropKey('name');
+      late Vid a;
+      await db.runTransaction((txn) {
+        a = txn.addNode(
+            labelIds: [label], props: {nameKey: const PropString('A')});
+        txn.addNode(
+            labelIds: [label], props: {nameKey: const PropString('B')});
+      });
+      db.state.mergeNow();
+      // The vid captured before the merge still resolves the same data
+      // and is still found by labelScan.
+      expect(db.getNodeStringProp(a, nameKey), 'A');
+      expect(db.labelScan(label), contains(a.value));
+    });
+  });
+
+  group('hasPendingWrites', () {
+    test('tracks the overlay dirty state across commit and merge', () async {
+      final db = _emptyDb();
+      final label = db.internLabel('Thing');
+      expect(db.hasPendingWrites, isFalse);
+      await db.runTransaction((txn) => txn.addNode(labelIds: [label]));
+      expect(db.hasPendingWrites, isTrue);
+      db.state.mergeNow();
+      expect(db.hasPendingWrites, isFalse);
+    });
+  });
 }
