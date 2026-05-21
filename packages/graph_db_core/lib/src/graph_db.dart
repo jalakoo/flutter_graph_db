@@ -205,10 +205,13 @@ class GraphDb {
 
   // ---------------------------------------------------------------- labels
 
-  /// All vids carrying [labelId], in ascending order. The returned
-  /// [Uint32List] is a view into a pre-built sorted index — do not
-  /// mutate it.
-  Uint32List labelScan(int labelId) => _state.labelScan(labelId);
+  /// All vids carrying [labelId], in ascending order. **Read-your-writes:**
+  /// committed mutations are reflected immediately — no `mergeNow()`
+  /// required. When no writes are pending the returned [Uint32List] is a
+  /// zero-copy view into the pre-built CSR index; when the overlay is
+  /// dirty it is a freshly-sorted copy folding in overlay-added nodes and
+  /// label changes. Either way, do not mutate it.
+  Uint32List labelScan(int labelId) => _state.effectiveLabelScan(labelId);
 
   // --------------------------------------------------------- property reads
   //

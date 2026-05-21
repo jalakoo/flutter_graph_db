@@ -334,6 +334,22 @@ class MutableGraphState {
   Uint32List labelScan(int labelId) =>
       csr.labelIndex[labelId] ?? _emptyU32;
 
+  /// Overlay-aware label scan — all vids that *effectively* carry
+  /// [labelId], in ascending order (read-your-writes). When the overlay
+  /// is empty this is the zero-copy CSR index view (identical instance to
+  /// [labelScan]); when writes are pending it folds the overlay in (base
+  /// index − tombstones − dropped overrides + overlay-added nodes +
+  /// gained overrides, via [_forEachVidWithLabel]) and returns a
+  /// freshly-sorted copy. The public `GraphDb.labelScan` routes here so
+  /// committed mutations are visible without an explicit `mergeNow()`.
+  Uint32List effectiveLabelScan(int labelId) {
+    if (overlay.isEmpty) return csr.labelIndex[labelId] ?? _emptyU32;
+    final out = <int>[];
+    _forEachVidWithLabel(labelId, out.add);
+    out.sort();
+    return Uint32List.fromList(out);
+  }
+
   static final Uint32List _emptyU32 = Uint32List(0);
 
   // ----- Property reads — raw primitives -----------------------
