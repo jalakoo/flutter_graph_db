@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Read-your-writes reads
+
+The public read API is now read-your-writes: a committed mutation is
+visible to the engine's own reads immediately, with no
+`db.state.mergeNow()`. Merge becomes a pure background-compaction
+detail, never a correctness step. Spec'd in
+`flutter_graph_db_plans/6_IMPROVED_API_PLAN.md`.
+
+**Changed**
+- `GraphDb.labelScan`, `forEachOutNeighbor` / `forEachInNeighbor`,
+  `nodeCount` / `edgeCount`, and `outDegree` / `inDegree` are now
+  overlay-aware. (Property reads and the GQL `MATCH` surface already
+  were.)
+- Fixes a latent `RangeError` when traversing or measuring the degree
+  of an overlay-added node before the first merge.
+
+**New APIs**
+- `GraphDb.hasPendingWrites` — `true` while committed writes sit in the
+  overlay (CSR not yet refreshed).
+- `MutableGraphState.effectiveLabelScan` / `effectiveNodeCount` /
+  `effectiveEdgeCount`; `effectiveOutDegree` / `effectiveInDegree` gain
+  an O(1) clean-overlay fast path.
+
+**Unchanged by design**
+- The allocation-free primitive range API (`outRangeStart` /
+  `outRangeEnd` / `outNeighborAt` / …) keeps snapshot-of-last-merge
+  semantics — the documented exception to read-your-writes. Pair it
+  with `hasPendingWrites`, or call `mergeNow()` first.
+
 ### Multi-label nodes
 
 Nodes can now carry an arbitrary set of labels (Neo4j-style

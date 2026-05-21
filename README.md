@@ -199,7 +199,14 @@ dart compile exe bin/read_bench.dart -o build/bench && ./build/bench   # AOT
 - **Per-vid delta overlay + worker-isolate merge** — mutations land in
   an overlay; on a size threshold, a background isolate copy-folds it
   into a fresh CSR and the main isolate installs via pointer swap.
-  Web targets fall back to a synchronous main-isolate fold.
+  Web targets fall back to a synchronous main-isolate fold. **Reads are
+  read-your-writes:** `labelScan`, traversal (`forEachOut/InNeighbor`),
+  `nodeCount` / `edgeCount` / degrees, property reads, and the GQL
+  `MATCH` surface all consult the overlay, so a committed mutation is
+  visible immediately — merge is a pure background-compaction detail,
+  never a correctness step. The allocation-free primitive range API is
+  the one snapshot-of-last-merge exception; `db.hasPendingWrites` reports
+  when it is stale.
 - **WAL persistence** — CBOR + length-prefix framing + xxHash64
   checksum per record. Recovery is two-pass redo-with-commit. Three
   adapters in tree: in-memory, native file (`dart:io`), and IndexedDB.
