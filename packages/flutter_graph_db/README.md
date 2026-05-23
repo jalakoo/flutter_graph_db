@@ -49,21 +49,12 @@ The shortest path to a working engine. No WAL, no persistence — good
 for tests and the read-of-the-week.
 
 ```dart
-import 'dart:typed_data';
 import 'package:flutter_graph_db/flutter_graph_db.dart';
 
 Future<void> main() async {
-  final db = GraphDb.fromState(MutableGraphState.fromFixture(
-    nodeCount: 0,
-    srcs: Uint32List(0),
-    dsts: Uint32List(0),
-    edgeTypes: Uint32List(0),
-    labelOf: Uint32List(0),
-    labelNames: const [],
-    edgeTypeNames: const [],
-    vidSpace: 1024,
-    eidSpace: 1024,
-  ));
+  // An in-memory WAL store gives a real engine with no on-disk
+  // persistence — ideal for tests and scratch work.
+  final db = await openWalBackedGraphDb(store: InMemoryWalStore());
 
   final person = db.internLabel('Person');
   final knows = db.internEdgeType('KNOWS');
@@ -79,45 +70,61 @@ Future<void> main() async {
     txn.addEdge(src: ada, dst: bob, typeId: knows);
   });
 
-  // Primitive range reads — allocation-free.
-  for (final v in db.labelScan(person)) {
+  // Reads are read-your-writes — the committed nodes show up here with
+  // no mergeNow() call. labelScan returns raw int ids; wrap in Vid(..).
+  for (final id in db.labelScan(person)) {
+    final v = Vid(id);
     print('${db.getNodeStringProp(v, name)} '
           'out=${db.outDegree(v)}');
   }
 
   // GQL via the extension method `executeQuery` (re-exported from
-  // graph_db_gql).
-  final rows = await db.executeQuery(
+  // graph_db_gql). Results come back as `result.rows`, each row a
+  // `row.values[...]` map keyed by RETURN alias.
+  final result = await db.executeQuery(
     'MATCH (n:Person) RETURN n.name AS name',
-    {},
   );
-  for (final row in rows) {
-    print(row['name']);
+  for (final row in result.rows) {
+    print(row.values['name']);
   }
+
+  await db.close();
 }
 ```
 
 ## Read-your-writes — the merge lifecycle
 
-`runTransaction` lands committed mutations in the per-vid **overlay**.
-Indexed reads (`labelScan`, `outDegree`, `outNeighbors`, etc.) and
-`nodeCount` / `edgeCount` read from the CSR base; they don't see the
-overlay until the next merge.
-
-Merges happen automatically at `max(10_000, 5% of edges)` per state.
-For "read-your-writes" right after a transaction:
+`runTransaction` lands committed mutations in the per-vid **overlay**,
+which a background merge later folds into the immutable CSR base. That
+merge is a pure compaction detail — **it is never required for
+correctness.** A committed mutation is visible to the next read
+immediately:
 
 ```dart
 await db.runTransaction((txn) {
   txn.addNode(labelIds: [person], props: {name: const PropString('Ada')});
 });
-// Force the overlay to fold into CSR — typically <50µs on a small graph.
-db.state.mergeNow();
-// Now labelScan, nodeCount, etc. see the new node.
+// No mergeNow() — labelScan, nodeCount, degrees, traversal, property
+// reads and executeQuery all already see the new node.
+db.labelScan(person); // includes Ada
 ```
 
-`executeQuery` (GQL) already does this — the planner reads the live
-state including the overlay, so GQL is always consistent.
+`labelScan`, `forEachOutNeighbor` / `forEachInNeighbor`, `outDegree` /
+`inDegree`, `nodeCount` / `edgeCount`, the property accessors,
+`hasLabel` / `labelsOf`, and the GQL `MATCH` surface are all
+overlay-aware.
+
+**The one exception** is the allocation-free *primitive range* API
+(`outRangeStart` / `outRangeEnd` / `outNeighborAt`, and the `in`
+equivalents). Those index straight into the CSR arrays, so they reflect
+only the last merge — the deliberate price of the zero-allocation
+guarantee. `db.hasPendingWrites` tells you when the CSR is stale
+relative to committed writes; call `db.state.mergeNow()` to fold the
+overlay in (typically <50µs on a small graph) before using that path,
+or just use `forEachOutNeighbor`, which is read-your-writes.
+
+Merges otherwise happen automatically once the overlay reaches
+`max(10_000, 5% of edges)`.
 
 ## Mobile / desktop persistence (iOS / Android / macOS / Windows / Linux)
 
@@ -189,8 +196,16 @@ export 'db_factory_io.dart'
 
 ## Snapshot + compact cycle (long-running apps)
 
-After enough mutations, the WAL grows. Take a snapshot, persist it,
-and compact the WAL up to the snapshot's LSN:
+> **Gotcha — the WAL does not self-compact yet.** There is no automatic
+> checkpoint: every committed mutation appends to the WAL forever until
+> *you* run the cycle below. A long-running app that never compacts will
+> see the WAL file grow without bound and startup recovery slow down in
+> proportion (recovery replays the whole tail). Until auto-checkpoint
+> ships, run this cycle periodically — e.g. on a write-count / file-size
+> threshold, or at a safe lifecycle point like backgrounding.
+
+Take a snapshot, persist it, and compact the WAL up to the snapshot's
+LSN:
 
 ```dart
 db.state.mergeNow(); // codec invariant: overlay must be empty

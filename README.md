@@ -9,7 +9,9 @@ browser (`dart2js` + `dart2wasm`) from the same code path.
 ## Contents
 
 - [What's in the box](#whats-in-the-box)
-- [Quick start](#quick-start)
+- [Getting started](#getting-started)
+- [API reference](#api-reference)
+- [Run the demo](#run-the-demo)
 - [Layout](#layout)
 - [Tests](#tests)
 - [Performance](#performance)
@@ -32,14 +34,124 @@ Nine packages plus a Flutter example app.
 | [`graph_db_bench`](packages/graph_db_bench) | R-MAT generators + latency / GC-event harness for repeatable perf measurement. |
 | [`example/`](example) | Flutter sample app — Material 3, six tabs, real CRUD, WAL-backed persistence, in-app perf bench. |
 
-## Quick start
+## Getting started
 
-Use the engine in your own app — see the
-[umbrella package README](packages/flutter_graph_db/README.md) for the
-full consumer guide (install, in-memory quickstart, web / mobile /
-desktop persistence wiring, snapshot cycle, sub-package map).
+Add the umbrella package — one dependency, one import gives you the
+engine + WAL persistence + the GQL query layer. It isn't on `pub.dev`
+yet, so use a git (or local path) dependency:
 
-Tour the engine via the demo:
+```yaml
+dependencies:
+  flutter_graph_db:
+    git:
+      url: https://github.com/jalakoo/flutter_graph_db.git
+      path: flutter_graph_db/packages/flutter_graph_db
+```
+
+The file below opens a database and runs every basic verb —
+**import, initialize, write, read, edit, delete** — against the stable
+public API:
+
+```dart
+import 'package:flutter_graph_db/flutter_graph_db.dart';
+
+Future<void> main() async {
+  // 1 — OPEN. An in-memory store means no persistence (tests / scratch).
+  //     Swap it for IoWalStore.open(path) on mobile/desktop or
+  //     IndexedDbWalStore on web to persist — nothing else here changes.
+  final db = await openWalBackedGraphDb(store: InMemoryWalStore());
+
+  // 2 — INITIALIZE the catalog. Labels, edge types and property keys are
+  //     stored as compact int ids. Intern a name once; reuse the id.
+  final person = db.internLabel('Person');
+  final knows  = db.internEdgeType('KNOWS');
+  final name   = db.internPropKey('name');
+
+  // 3 — WRITE. One runTransaction commits atomically and forwards its
+  //     return value back to the caller.
+  final ada = await db.runTransaction((txn) {
+    final a = txn.addNode(labelIds: [person], props: {name: const PropString('Ada')});
+    final b = txn.addNode(labelIds: [person], props: {name: const PropString('Bob')});
+    txn.addEdge(src: a, dst: b, typeId: knows);
+    return a;
+  });
+
+  // 4 — READ. Committed writes are visible immediately — reads are
+  //     read-your-writes, no mergeNow() required. labelScan returns raw
+  //     int ids; wrap each in Vid(..) for the typed read accessors.
+  for (final id in db.labelScan(person)) {
+    final v = Vid(id);
+    print('${db.getNodeStringProp(v, name)}  out=${db.outDegree(v)}');
+  }
+
+  // 5 — EDIT. Re-open a transaction; set the property to a new value.
+  await db.runTransaction((txn) {
+    txn.setNodeProp(ada, name, const PropString('Ada Lovelace'));
+  });
+
+  // 6 — DELETE. Tombstones the node and cascades its incident edges
+  //     (vids are monotonic and never reused).
+  await db.runTransaction((txn) => txn.delNode(ada));
+
+  await db.close();
+}
+```
+
+Prefer a query language? The same read is one line of the OpenCypher
+subset (note: results come back as `result.rows`, each a
+`row.values[...]` map):
+
+```dart
+final result = await db.executeQuery('MATCH (n:Person) RETURN n.name AS name');
+for (final row in result.rows) {
+  print(row.values['name']);
+}
+```
+
+**Persisting on a real device.** Swap the in-memory store for the
+platform adapter — your code above is unchanged. The native adapter
+ships in a separate import so a web build keeps `dart:io` out of its
+dependency cone:
+
+```dart
+import 'package:graph_db_wal/io_wal_store.dart';      // native: iOS / Android / desktop
+import 'package:path_provider/path_provider.dart';
+
+final dir = await getApplicationDocumentsDirectory();
+final store = await IoWalStore.open('${dir.path}/graph.wal');
+final db = await openWalBackedGraphDb(store: store);   // recovers the prior session
+```
+
+For web persistence, the snapshot + compact cycle, and the conditional
+import that picks the right adapter per platform, see the
+[umbrella package README](packages/flutter_graph_db/README.md).
+
+## API reference
+
+Two complementary views of the public surface:
+
+- **[API cheatsheet](docs/api-cheatsheet.md)** — the consumer-facing
+  methods grouped by task (open · catalog · write · read · query), one
+  line each. Start here when you know *what* you want to do.
+- **dartdoc** — the exhaustive, always-in-sync reference generated from
+  the in-source `///` comments. Generate and browse it locally:
+
+  ```sh
+  cd packages/flutter_graph_db
+  dart pub get
+  dart doc .                       # writes HTML to doc/api/ (gitignored)
+  open doc/api/index.html          # or serve: dart pub global activate dhttpd && dhttpd -p doc/api
+  ```
+
+  Because you depend on the umbrella, the re-exported symbols from
+  `graph_db_core` / `_wal` / `_gql` (`GraphDb`, `PropString`, …) all
+  appear in the one `flutter_graph_db` library page — no extra config.
+
+## Run the demo
+
+Tour the full public API in a real app — People / Companies / Graph /
+Stats tabs, live CRUD, WAL-backed persistence, an interactive
+node-link view, and the in-app perf bench:
 
 ```sh
 cd example
