@@ -13,6 +13,7 @@
 library;
 
 export 'src/codec/wal_codec.dart' show WalCodec, WalDecoder;
+export 'src/in_memory_snapshot_store.dart' show InMemorySnapshotStore;
 export 'src/in_memory_wal_store.dart' show InMemoryWalStore;
 export 'src/recovery.dart'
     show
@@ -22,6 +23,7 @@ export 'src/recovery.dart'
         recoverInto;
 export 'src/segmented_in_memory_wal_store.dart'
     show SegmentedInMemoryWalStore, kDefaultWalSegmentBytes;
+export 'src/snapshot_store.dart' show SnapshotStore;
 export 'src/wal_reader.dart' show WalReader;
 export 'src/wal_store.dart' show WalStore;
 export 'src/wal_writer.dart' show WalWriter;
