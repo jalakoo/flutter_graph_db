@@ -26,7 +26,8 @@ the dartdoc — see [API reference](../README.md#api-reference).
 | `openWalBackedGraphDb(store: await IoWalStore.open(path))` | `Future<GraphDb>` | Native (iOS / Android / desktop). Import `package:graph_db_wal/io_wal_store.dart`. Recovers the prior session automatically. |
 | `openWalBackedGraphDb(store: await openIndexedDbWalStore())` | `Future<GraphDb>` | Web. Import `package:graph_db_wal/indexeddb_wal_store.dart`. |
 | `openWalBackedGraphDb(store: store, snapshot: bytes)` | `Future<GraphDb>` | Restore a snapshot, then replay WAL appended after it. |
-| `db.close()` | `Future<void>` | Flush + release. |
+| `openGraphDbAtPath(path)` | `Future<DurableGraphDb>` | **One-call durable open** (native; import `io_wal_store.dart`). Wires WAL + snapshot store, restores the latest snapshot, replays the tail, and auto-checkpoints. Use `handle.db`, `handle.checkpointNow()`, `handle.close()`. |
+| `db.close()` | `Future<void>` | Flush + release. Idempotent — 2nd+ call is a no-op. |
 
 See the [umbrella README](../packages/flutter_graph_db/README.md) for
 the per-platform persistence wiring and the conditional import.
@@ -38,8 +39,10 @@ the per-platform persistence wiring and the conditional import.
 | `db.internLabel(name)` | `int` | Idempotent — returns the existing id if already interned. |
 | `db.internEdgeType(name)` | `int` | |
 | `db.internPropKey(name)` | `int` | |
-| `db.labelName(id)` | `String?` | Reverse lookup. `null` if unknown. |
+| `db.labelName(id)` | `String?` | Reverse lookup (id → name). `null` if unknown. |
 | `db.edgeTypeName(id)` / `db.propKeyName(id)` | `String?` | |
+| `db.labelId(name)` | `int?` | Name → id, **without** interning. `null` if not yet interned — use to read by name without creating a catalog entry. |
+| `db.edgeTypeId(name)` / `db.propKeyId(name)` | `int?` | |
 
 ## Write — `db.runTransaction((txn) { ... })`
 
@@ -59,6 +62,15 @@ or concurrent `runTransaction` throws `StateError`.
 | `txn.delNode(vid)` | `void` | Tombstones the node **and cascades its incident edges**. |
 | `txn.delEdge(eid)` | `void` | |
 | `txn.declareConstraint(spec)` / `txn.dropConstraint(name)` | `void` | Unique / existence constraints. |
+
+**String-keyed convenience** (auto-intern names; the int-keyed methods
+above stay the hot path):
+
+| Call (on `txn`) | Returns | Notes |
+|---|---|---|
+| `txn.addNodeNamed(labels: ['Person'], props: {'name': PropString('Ada')})` | `Vid` | Interns labels + prop keys. |
+| `txn.addEdgeNamed(src: a, dst: b, type: 'KNOWS', props: {..})` | `Eid` | Interns edge type + prop keys. |
+| `txn.setNodePropNamed(vid, 'name', value)` / `txn.setEdgePropNamed(eid, 'k', value)` | `void` | Interns the key. |
 
 ```dart
 final db2 = await db.runTransaction(
@@ -85,7 +97,8 @@ All read-your-writes: a committed mutation is reflected immediately, no
 
 | Call | Returns | Notes |
 |---|---|---|
-| `db.labelScan(labelId)` | `Uint32List` | **Raw int** vids carrying the label, ascending. Read-your-writes. Wrap each in `Vid(..)` for the typed accessors; do not mutate the list. |
+| `db.labelScan(labelId)` | `Uint32List` | **Raw int** vids carrying the label, ascending. Read-your-writes. Allocation-free hot path; do not mutate the list. |
+| `db.labelScanVids(labelId)` | `Iterable<Vid>` | Typed, lazy view over `labelScan` — no copy, no `Vid(..)` wrapping at the call site. Read-your-writes. |
 | `db.forEachOutNeighbor(vid, (dst, eid, edgeType) { .. })` | `void` | Read-your-writes. Skips removed edges and deleted endpoints. |
 | `db.forEachInNeighbor(vid, (src, eid, edgeType) { .. })` | `void` | Read-your-writes. |
 | `db.outRangeStart(vid)` / `outRangeEnd(vid)` / `outNeighborAt(i)` / `edgeIdAt(i)` / `edgeTypeAt(i)` | `int` / `Vid` / `Eid` | **Allocation-free, snapshot-of-last-merge — NOT read-your-writes.** Hot path only. `in*` equivalents exist. Guard with `hasPendingWrites`. |
@@ -113,6 +126,17 @@ when the presence/type isn't certain.
 | `db.nodePropIsNull(vid, keyId)` | `bool` | |
 | `db.nodePropType(keyId)` | `ColumnType?` | Also `edgePropType`. |
 | `db.getNodeProp(vid, keyId)` | `PropValue?` | Boxed boundary form (allocates) — `getEdgeProp` too. Prefer typed accessors on the hot path. |
+
+### Find nodes by property
+
+Read-your-writes scans over the labelled set — saves the
+`labelScan` + per-vid compare boilerplate. O(n) in the label; for large
+equality-heavy workloads build a `createNodePropertyIndex` instead.
+
+| Call | Returns | Notes |
+|---|---|---|
+| `db.findNodeByProp(labelId, keyId, value)` | `Vid?` | First match, or `null`. `value` is a `PropValue`. Absent/NULL never matches a non-null value. |
+| `db.findNodesByProp(labelId, keyId, value)` | `List<Vid>` | All matches, ascending by vid. |
 
 ### `PropValue` types
 
@@ -160,14 +184,19 @@ for (final row in result.rows) {
 | `encodeSnapshot(db.state)` → `.bytes` | Serialize current state. |
 | `compactToCurrentTip(store: store)` | Truncate the WAL after persisting a snapshot. |
 
-The snapshot + compact cycle is documented end-to-end in the
-[umbrella README](../packages/flutter_graph_db/README.md#snapshot--compact-cycle-long-running-apps).
+### Automatic checkpointing (no manual cycle needed)
 
-> **WAL growth — there is no automatic checkpoint yet.** The WAL appends
-> on every commit and only shrinks when *you* run the snapshot + compact
-> cycle above. In a long-running app, trigger it on a write-count or
-> file-size threshold (or at backgrounding) — otherwise the WAL grows
-> unbounded and startup recovery slows in proportion.
+| Symbol | Notes |
+|---|---|
+| `SnapshotStore` | Port for persisting/loading the latest snapshot. Adapters: `InMemorySnapshotStore`, `IoSnapshotStore` (native). |
+| `CheckpointPolicy({walBytesThreshold, commitCountThreshold})` | When to auto-checkpoint. Defaults to 8 MiB. `CheckpointPolicy.disabled` to opt out. |
+| `CheckpointCoordinator(db:, walStore:, snapshotStore:, policy:)..attach()` | Wires the post-commit hook. Writes the snapshot durably, *then* truncates the WAL (crash-safe). |
+| `coordinator.checkpointNow()` | Force a checkpoint (e.g. on backgrounding). |
+
+`openGraphDbAtPath` wires all of this for you — most apps never touch
+the coordinator directly. The manual snapshot + compact cycle is still
+documented in the
+[umbrella README](../packages/flutter_graph_db/README.md#snapshot--compact-cycle-long-running-apps).
 
 ## Errors
 

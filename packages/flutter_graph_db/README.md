@@ -196,13 +196,15 @@ export 'db_factory_io.dart'
 
 ## Snapshot + compact cycle (long-running apps)
 
-> **Gotcha — the WAL does not self-compact yet.** There is no automatic
-> checkpoint: every committed mutation appends to the WAL forever until
-> *you* run the cycle below. A long-running app that never compacts will
-> see the WAL file grow without bound and startup recovery slow down in
-> proportion (recovery replays the whole tail). Until auto-checkpoint
-> ships, run this cycle periodically — e.g. on a write-count / file-size
-> threshold, or at a safe lifecycle point like backgrounding.
+> **Most apps want auto-checkpointing instead of this manual cycle.**
+> The WAL appends on every commit; left alone it grows without bound and
+> startup recovery slows in proportion (recovery replays the whole tail).
+> [`openGraphDbAtPath`](../graph_db_wal) wires automatic checkpointing
+> (snapshot + WAL truncate on a size/commit threshold) for you — or
+> attach a `CheckpointCoordinator` to a manually-opened db. The manual
+> cycle below is the lower-level primitive those build on; reach for it
+> only when you need explicit control (e.g. checkpoint exactly on
+> backgrounding via `DurableGraphDb.checkpointNow()`).
 
 Take a snapshot, persist it, and compact the WAL up to the snapshot's
 LSN:
