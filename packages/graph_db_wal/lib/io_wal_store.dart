@@ -8,5 +8,6 @@
 /// a future enhancement.
 library;
 
+export 'src/durable_graph_db.dart' show DurableGraphDb, openGraphDbAtPath;
 export 'src/io_snapshot_store.dart' show IoSnapshotStore;
 export 'src/io_wal_store.dart' show IoWalStore;
