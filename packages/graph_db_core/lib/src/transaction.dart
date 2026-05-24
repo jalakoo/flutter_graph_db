@@ -40,7 +40,26 @@ class Transaction {
 
   bool _terminated = false;
 
-  Transaction(this.txnId, this._state, {this.capturePrevValues = false});
+  // Journaled interners, wired by `GraphDb.runTransaction`. The
+  // string-keyed convenience methods route through these so a new
+  // label / edge type / prop key is recorded in the WAL (via the
+  // engine's pending-intern queue) before any op references it. Null
+  // when a `Transaction` is built directly (e.g. in low-level tests),
+  // in which case the string-keyed methods throw.
+  final int Function(String name)? _internLabel;
+  final int Function(String name)? _internEdgeType;
+  final int Function(String name)? _internPropKey;
+
+  Transaction(
+    this.txnId,
+    this._state, {
+    this.capturePrevValues = false,
+    int Function(String name)? internLabel,
+    int Function(String name)? internEdgeType,
+    int Function(String name)? internPropKey,
+  })  : _internLabel = internLabel,
+        _internEdgeType = internEdgeType,
+        _internPropKey = internPropKey;
 
   /// The unsequenced ops queued so far. Exposed for tests + tooling;
   /// callers should not mutate.
@@ -173,6 +192,81 @@ class Transaction {
     _check();
     _buffer.add(DelEdgeProp(eid: eid, keyId: keyId));
   }
+
+  // ----- string-keyed convenience overloads -----
+  //
+  // Ergonomic wrappers that auto-intern names so callers don't have to
+  // `internLabel` / `internPropKey` up front. Each name is interned
+  // through the engine's journaled path (recorded in the WAL). The
+  // int-keyed methods above stay the documented hot path — interning is
+  // a map lookup per name and these allocate the translated maps.
+
+  int _intern(int Function(String)? fn, String kind, String name) {
+    if (fn == null) {
+      throw StateError(
+        'string-keyed transaction methods require a transaction created by '
+        'GraphDb.runTransaction (no $kind interner is wired)',
+      );
+    }
+    return fn(name);
+  }
+
+  /// String-keyed [addNode]: [labels] and [props] keys are auto-interned.
+  Vid addNodeNamed({
+    required List<String> labels,
+    Map<String, PropValue> props = const {},
+    String? logicalId,
+  }) {
+    final labelIds = [
+      for (final l in labels) _intern(_internLabel, 'label', l),
+    ];
+    final propIds = <int, PropValue>{
+      for (final e in props.entries)
+        _intern(_internPropKey, 'property key', e.key): e.value,
+    };
+    return addNode(labelIds: labelIds, props: propIds, logicalId: logicalId);
+  }
+
+  /// String-keyed [addEdge]: [type] and [props] keys are auto-interned.
+  Eid addEdgeNamed({
+    required Vid src,
+    required Vid dst,
+    required String type,
+    Map<String, PropValue> props = const {},
+    String? logicalId,
+  }) {
+    final propIds = <int, PropValue>{
+      for (final e in props.entries)
+        _intern(_internPropKey, 'property key', e.key): e.value,
+    };
+    return addEdge(
+      src: src,
+      dst: dst,
+      typeId: _intern(_internEdgeType, 'edge type', type),
+      props: propIds,
+      logicalId: logicalId,
+    );
+  }
+
+  /// String-keyed [setNodeProp]: [key] is auto-interned.
+  void setNodePropNamed(
+    Vid vid,
+    String key,
+    PropValue value, {
+    PropValue? prevValue,
+  }) =>
+      setNodeProp(vid, _intern(_internPropKey, 'property key', key), value,
+          prevValue: prevValue);
+
+  /// String-keyed [setEdgeProp]: [key] is auto-interned.
+  void setEdgePropNamed(
+    Eid eid,
+    String key,
+    PropValue value, {
+    PropValue? prevValue,
+  }) =>
+      setEdgeProp(eid, _intern(_internPropKey, 'property key', key), value,
+          prevValue: prevValue);
 
   // ----- constraint catalog -----
 

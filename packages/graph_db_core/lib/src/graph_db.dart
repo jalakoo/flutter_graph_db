@@ -385,6 +385,9 @@ class GraphDb {
       txnId,
       _state,
       capturePrevValues: capturePrevValues,
+      internLabel: internLabel,
+      internEdgeType: internEdgeType,
+      internPropKey: internPropKey,
     );
     try {
       final result = await body(txn);
