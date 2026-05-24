@@ -12,6 +12,7 @@
 /// segments and the redo-with-commit recovery protocol sit on top.
 library;
 
+export 'src/checkpoint.dart' show CheckpointCoordinator, CheckpointPolicy;
 export 'src/codec/wal_codec.dart' show WalCodec, WalDecoder;
 export 'src/in_memory_snapshot_store.dart' show InMemorySnapshotStore;
 export 'src/in_memory_wal_store.dart' show InMemoryWalStore;

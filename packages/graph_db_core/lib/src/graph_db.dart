@@ -49,6 +49,16 @@ class GraphDb {
   /// guaranteed idempotent, so we make it a no-op here instead.
   bool _closed = false;
 
+  /// Invoked synchronously after each successful commit (after the
+  /// overlay-merge check, while the just-committed state is applied).
+  ///
+  /// Internal-collaborator hook — `graph_db_wal`'s auto-checkpoint
+  /// coordinator registers here to observe write activity. Keep the
+  /// callback cheap and schedule any heavy work (snapshot I/O)
+  /// asynchronously; it runs on the commit path. Setting it replaces any
+  /// prior callback; `null` clears it.
+  void Function()? afterCommit;
+
   GraphDb._(this._state, [this._sink]);
 
   /// Wraps an already-built [MutableGraphState]. Fixture loaders (e.g.
@@ -388,6 +398,9 @@ class GraphDb {
     // worker isolate when a coordinator is wired, otherwise falls back
     // to the synchronous main-isolate fold.
     await _state.maybeMergeOverlayAsync();
+    // Post-commit hook (auto-checkpoint coordinator). Fires only on a
+    // real commit — the early-return above skips empty no-op txns.
+    afterCommit?.call();
   }
 
   void _terminate(Transaction txn) {
