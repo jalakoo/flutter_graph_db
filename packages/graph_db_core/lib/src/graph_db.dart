@@ -257,6 +257,21 @@ class GraphDb {
   /// label changes. Either way, do not mutate it.
   Uint32List labelScan(int labelId) => _state.effectiveLabelScan(labelId);
 
+  /// All vids carrying [labelId] as typed [Vid]s, ascending. The
+  /// ergonomic companion to [labelScan] — a **lazy view** over the same
+  /// index, so iterating it costs no copy of the underlying `Uint32List`
+  /// (each [Vid] is a zero-cost wrap of the int). Read-your-writes, same
+  /// as [labelScan]. Use [labelScan] directly for the allocation-free
+  /// indexed hot path.
+  ///
+  /// ```dart
+  /// for (final v in db.labelScanVids(person)) {
+  ///   print(db.getNodeStringProp(v, name)); // v is a Vid — no Vid(..) wrap
+  /// }
+  /// ```
+  Iterable<Vid> labelScanVids(int labelId) =>
+      _state.effectiveLabelScan(labelId).map(Vid.new);
+
   // --------------------------------------------------------- property reads
   //
   // Raw primitives — caller knows the type (`columnType` on the
