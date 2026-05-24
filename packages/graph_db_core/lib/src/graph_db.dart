@@ -44,6 +44,11 @@ class GraphDb {
   /// the order it was applied.
   final List<InternString> _pendingInterns = [];
 
+  /// Set by the first [close] call. Guards against double-close: a
+  /// second `close()` re-invoking the underlying sink's `close()` is not
+  /// guaranteed idempotent, so we make it a no-op here instead.
+  bool _closed = false;
+
   GraphDb._(this._state, [this._sink]);
 
   /// Wraps an already-built [MutableGraphState]. Fixture loaders (e.g.
@@ -58,9 +63,14 @@ class GraphDb {
 
   /// Closes the engine: flushes any pending `InternString` ops as a
   /// final empty-but-not-quite commit (if a sink is configured), then
-  /// closes the sink. Safe to call once; subsequent commit attempts
-  /// fail at the sink layer.
+  /// closes the sink.
+  ///
+  /// **Idempotent** — the second and later calls are no-ops and return
+  /// without touching the sink. After close, commit attempts still fail
+  /// at the sink layer. Returns immediately once closed.
   Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
     if (_sink != null && _pendingInterns.isNotEmpty) {
       // Flush pending interns through an empty user-op txn so they
       // land in the WAL with proper Begin/Commit framing. Use
