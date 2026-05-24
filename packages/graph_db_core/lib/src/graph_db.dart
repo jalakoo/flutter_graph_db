@@ -148,6 +148,15 @@ class GraphDb {
   String? edgeTypeName(int id) => _state.strings.edgeTypeOf(id);
   String? propKeyName(int id) => _state.strings.propKeyOf(id);
 
+  // Non-interning name → id resolvers. Unlike [internLabel] etc., these
+  // never create a new catalog entry (and never touch the WAL): they
+  // return the existing id or `null`. Use them to read by name without
+  // polluting the catalog with keys that don't exist yet — e.g.
+  // `final k = db.propKeyId('name'); if (k != null) db.getNodeStringProp(v, k);`
+  int? labelId(String name) => _state.strings.labelIdOf(name);
+  int? edgeTypeId(String name) => _state.strings.edgeTypeIdOf(name);
+  int? propKeyId(String name) => _state.strings.propKeyIdOf(name);
+
   // -------------------------------------------------------------- topology
 
   /// Total node count. **Read-your-writes:** committed mutations are
@@ -284,6 +293,36 @@ class GraphDb {
       _state.nodeProps.getBoxed(vid.value, keyId);
   PropValue? getEdgeProp(Eid eid, int keyId) =>
       _state.edgeProps.getBoxed(eid.value, keyId);
+
+  // --------------------------------------------------------------- lookups
+  //
+  // Convenience finders over the read-your-writes scan — they save the
+  // `labelScan` + per-vid compare boilerplate consumers otherwise write
+  // by hand. O(n) in the labelled set, which suits the small-to-medium
+  // graphs this engine targets; for large, equality-heavy workloads build
+  // a secondary index ([createNodePropertyIndex]) and query it directly.
+
+  /// First node carrying [labelId] whose [keyId] property equals [value],
+  /// or `null` if none. **Read-your-writes** — committed mutations are
+  /// seen immediately. An absent or NULL property never matches a
+  /// non-null [value]. Boxes each candidate at the boundary; prefer the
+  /// typed accessors inside tight loops.
+  Vid? findNodeByProp(int labelId, int keyId, PropValue value) {
+    for (final raw in _state.effectiveLabelScan(labelId)) {
+      if (_state.nodeProps.getBoxed(raw, keyId) == value) return Vid(raw);
+    }
+    return null;
+  }
+
+  /// Every node carrying [labelId] whose [keyId] property equals [value],
+  /// ascending by vid. Read-your-writes — see [findNodeByProp].
+  List<Vid> findNodesByProp(int labelId, int keyId, PropValue value) {
+    final out = <Vid>[];
+    for (final raw in _state.effectiveLabelScan(labelId)) {
+      if (_state.nodeProps.getBoxed(raw, keyId) == value) out.add(Vid(raw));
+    }
+    return out;
+  }
 
   // ----- Transactions --------------------
 
