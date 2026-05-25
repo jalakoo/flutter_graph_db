@@ -51,6 +51,12 @@ throw. `runTransaction` forwards the body's return value, so you can
 hand back the `Vid`/`Eid` you just allocated. Single-writer: a nested
 or concurrent `runTransaction` throws `StateError`.
 
+**No reads inside the body.** The txn is buffer-only, so a high-level
+read (`db.nodeCount`, `db.getNodeProp`, `db.labelScan`, …) issued while
+it's in flight throws `StateError` rather than silently returning
+pre-commit state. Read before the transaction, or after it commits
+(committed writes are read-your-writes).
+
 | Call (on `txn`) | Returns | Notes |
 |---|---|---|
 | `txn.addNode(labelIds: [..], props: {keyId: PropValue})` | `Vid` | `props` optional; `logicalId` defaults to a fresh UUIDv7. |
@@ -135,8 +141,20 @@ equality-heavy workloads build a `createNodePropertyIndex` instead.
 
 | Call | Returns | Notes |
 |---|---|---|
-| `db.findNodeByProp(labelId, keyId, value)` | `Vid?` | First match, or `null`. `value` is a `PropValue`. Absent/NULL never matches a non-null value. |
-| `db.findNodesByProp(labelId, keyId, value)` | `List<Vid>` | All matches, ascending by vid. |
+| `db.findNodeByProp(keyId, value, {label})` | `Vid?` | First match, or `null`. `value` is a `PropValue`; pass `label:` to scan one label, omit to scan all. Absent/NULL never matches a non-null value. For a unique id, prefer `nodeByLogicalId`. |
+| `db.findNodesByProp(keyId, value, {label})` | `List<Vid>` | All matches, ascending by vid. |
+
+### Logical id (built-in unique index)
+
+Every node carries a `logicalId` (the UUIDv7 `addNode` mints, or the
+value you pass). The engine indexes it — no need to invent your own
+`extId` property + secondary index.
+
+| Call | Returns | Notes |
+|---|---|---|
+| `db.nodeByLogicalId(logicalId)` | `Vid?` | O(1) lookup. Read-your-writes. logicalId is **unique** — adding a duplicate throws `ConstraintViolation`. |
+| `db.getNodeLogicalId(vid)` | `String?` | The node's logicalId, or `null` if none / deleted. |
+| `txn.addNode(..., logicalId: 'my-id')` | `Vid` | Supply your own stable id instead of the default UUIDv7. |
 
 ### `PropValue` types
 
@@ -188,14 +206,24 @@ for (final row in result.rows) {
 
 | Symbol | Notes |
 |---|---|
-| `SnapshotStore` | Port for persisting/loading the latest snapshot. Adapters: `InMemorySnapshotStore`, `IoSnapshotStore` (native). |
-| `CheckpointPolicy({walBytesThreshold, commitCountThreshold})` | When to auto-checkpoint. Defaults to 8 MiB. `CheckpointPolicy.disabled` to opt out. |
+| `SnapshotStore` | Port for persisting/loading the latest snapshot. Adapters: `InMemorySnapshotStore`, `IoSnapshotStore` (native), `IndexedDbSnapshotStore` (web, via `openIndexedDbSnapshotStore()`). |
+| `CheckpointPolicy.auto(maxWalBytes:, everyCommits:)` | Auto-checkpoint thresholds (default 8 MiB). `CheckpointPolicy.manual` / `.disabled` to opt out. |
 | `CheckpointCoordinator(db:, walStore:, snapshotStore:, policy:)..attach()` | Wires the post-commit hook. Writes the snapshot durably, *then* truncates the WAL (crash-safe). |
 | `coordinator.checkpointNow()` | Force a checkpoint (e.g. on backgrounding). |
 
 `openGraphDbAtPath` wires all of this for you — most apps never touch
-the coordinator directly. The manual snapshot + compact cycle is still
-documented in the
+the coordinator directly. For a custom store, `openWalBackedGraphDb` also
+accepts `snapshotStore:` + `checkpoint:`:
+
+```dart
+openWalBackedGraphDb(
+  store: store,
+  snapshotStore: snaps,
+  checkpoint: CheckpointPolicy.auto(maxWalBytes: 1 << 20),
+);
+```
+
+The manual snapshot + compact cycle is still documented in the
 [umbrella README](../packages/flutter_graph_db/README.md#snapshot--compact-cycle-long-running-apps).
 
 ## Errors

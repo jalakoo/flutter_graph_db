@@ -52,23 +52,21 @@ the defer-commits convention).
 - **Tests:** `graph_db_wal/test/snapshot_store_test.dart` (incl.
   encode → store → load → decode round-trip).
 
-### ⚠️ findNodeByProp — shipped; built-in logical-id index — deferred
-- **Shipped:** `db.findNodeByProp(labelId, keyId, value) → Vid?` and
-  `db.findNodesByProp(...) → List<Vid>`, read-your-writes scans over the
-  labelled set (uses `PropValue` value-equality, all column types).
-  Plus non-interning name→id resolvers `db.labelId/edgeTypeId/propKeyId`
-  so reads-by-name don't pollute the catalog.
-- **Files:** `graph_db_core/lib/src/graph_db.dart`.
-- **Tests:** `graph_db_core/test/find_node_by_prop_test.dart`.
-- **Deferred — built-in logical-id index.** Blocked on a prerequisite:
-  `logicalId` is currently **neither durable nor readable** — it lives
-  only in the overlay's `AddedNode`, isn't persisted by `encodeSnapshot`,
-  and has no per-vid read accessor. A reliable logical-id index first
-  needs durable, readable logicalId storage (a cross-cutting change to
-  the snapshot codec + merge protocol + state). **Workaround today:**
-  store your own stable id as a property and use `findNodeByProp` (with
-  a unique `createNodePropertyIndex` for large sets). Tracked as a
-  follow-up: "durable + readable logicalId, then a logicalId→Vid index".
+### ✅ findNodeByProp + built-in logical-id index
+- **Shipped:** `db.findNodeByProp(keyId, value, {label})` and
+  `db.findNodesByProp(...)` — read-your-writes scans (PropValue
+  value-equality, all column types; `label:` scopes to a label, omit to
+  scan all). Plus non-interning resolvers `db.labelId/edgeTypeId/propKeyId`.
+- **Logical-id index (round 2):** `logicalId` is now durable + readable.
+  `MutableGraphState` keeps `vid↔logicalId` maps maintained in
+  `applyAddNode/applyDelNode` (so they rebuild for free on WAL recovery)
+  and persisted by the snapshot codec; uniqueness is enforced (duplicate
+  → `ConstraintViolation`). New facade: `db.nodeByLogicalId(id) → Vid?`
+  (O(1)) and `db.getNodeLogicalId(vid) → String?`.
+- **Files:** `graph_db_core/lib/src/graph_db.dart`,
+  `mutable_graph_state.dart`, `snapshot/snapshot.dart`.
+- **Tests:** `find_node_by_prop_test.dart`, `logical_id_test.dart`,
+  `graph_db_wal/test/logical_id_recovery_test.dart`.
 
 ### ✅ Idempotent `close()`
 - **Shipped:** a `_closed` guard makes the 2nd+ `GraphDb.close()` a
@@ -99,6 +97,25 @@ the defer-commits convention).
 - **Tests:** `graph_db_core/test/label_scan_vids_test.dart`.
 
 ---
+
+## Round 2 (2026-05-25) — reconcile API shapes + close the gaps
+
+Follow-up so the consumer can use the recommended call shapes directly,
+and to close the deferrals above.
+
+- **`CheckpointPolicy.auto(maxWalBytes:, everyCommits:)`** + `.manual`,
+  and `openWalBackedGraphDb(snapshotStore:, checkpoint:)` (attaches a
+  coordinator for custom-store callers). `graph_db_wal`.
+- **Label-free `findNodeByProp(keyId, value, {label})`** — signature
+  reworked so `label` is optional (scan-all by default).
+- **In-transaction reads throw** — high-level reads via a guarded `_r`
+  accessor raise `StateError` inside `runTransaction` instead of
+  silently returning pre-commit state. (GQL + the consumers already
+  read-before-write, so no breakage.)
+- **`IndexedDbSnapshotStore`** — web snapshot adapter mirroring the IDB
+  WAL store; behind `package:graph_db_wal/indexeddb_wal_store.dart`.
+  (Browser `-p chrome` test is a follow-up, as with the WAL adapter.)
+- **Built-in logical-id index** — see the (now ✅) P1 item above.
 
 ## Done earlier this session (2026-05-24) — documentation papercuts
 
