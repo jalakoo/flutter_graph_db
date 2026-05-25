@@ -24,9 +24,22 @@ class CheckpointPolicy {
     this.commitCountThreshold,
   });
 
-  /// Auto-checkpoint off — only manual [CheckpointCoordinator.checkpointNow].
-  static const CheckpointPolicy disabled =
+  /// Auto-checkpoint on a WAL-size (and/or commit-count) threshold.
+  /// Reads naturally at the call site:
+  /// `checkpoint: CheckpointPolicy.auto(maxWalBytes: 1 << 20)`.
+  const CheckpointPolicy.auto({
+    int maxWalBytes = 8 * 1024 * 1024,
+    int? everyCommits,
+  })  : walBytesThreshold = maxWalBytes,
+        commitCountThreshold = everyCommits;
+
+  /// Auto-checkpoint off — only manual [CheckpointCoordinator.checkpointNow]
+  /// (e.g. on app close). Alias: [disabled].
+  static const CheckpointPolicy manual =
       CheckpointPolicy(walBytesThreshold: null);
+
+  /// Auto-checkpoint off — only manual [CheckpointCoordinator.checkpointNow].
+  static const CheckpointPolicy disabled = manual;
 
   bool get isEnabled =>
       walBytesThreshold != null || commitCountThreshold != null;

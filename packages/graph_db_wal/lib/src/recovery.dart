@@ -21,7 +21,9 @@ import 'package:graph_db_core/graph_db_core.dart';
 // ignore: implementation_imports
 import 'package:graph_db_core/src/applicator.dart';
 
+import 'checkpoint.dart';
 import 'codec/wal_codec.dart';
+import 'snapshot_store.dart';
 import 'wal_reader.dart';
 import 'wal_store.dart';
 import 'wal_writer.dart';
@@ -106,20 +108,50 @@ Future<void> recoverInto(
 /// resume (callers are responsible for ensuring the WAL contents
 /// match the snapshot — typically by having taken the snapshot +
 /// truncated the WAL together; see [compactToCurrentTip]).
+///
+/// [snapshotStore] — optional engine-managed snapshot persistence. When
+/// given and no explicit [snapshot] bytes are passed, the latest snapshot
+/// is loaded from it before WAL replay. Combine with [checkpoint] to wire
+/// automatic compaction (snapshot + WAL truncate on a threshold):
+///
+/// ```dart
+/// openWalBackedGraphDb(
+///   store: store,
+///   snapshotStore: snaps,
+///   checkpoint: CheckpointPolicy.auto(maxWalBytes: 1 << 20),
+/// );
+/// ```
+///
+/// The attached coordinator is owned by the returned engine (it runs for
+/// the life of the db). For an explicit handle with `checkpointNow()` /
+/// clean `close()`, use `openGraphDbAtPath` / [CheckpointCoordinator].
 Future<GraphDb> openWalBackedGraphDb({
   required WalStore store,
   WalCodec codec = const WalCodec(),
   Uint8List? snapshot,
+  SnapshotStore? snapshotStore,
+  CheckpointPolicy checkpoint = CheckpointPolicy.disabled,
 }) async {
-  final state = snapshot != null
-      ? decodeSnapshot(snapshot)
+  final snap =
+      snapshot ?? (snapshotStore != null ? await snapshotStore.read() : null);
+  final state = snap != null
+      ? decodeSnapshot(snap)
       : await recoverGraphState(store: store, codec: codec);
-  if (snapshot != null) {
+  if (snap != null) {
     // Replay any WAL ops the snapshot doesn't already cover.
     await recoverInto(state, store: store, codec: codec);
   }
   final writer = WalWriter(store, codec: codec);
-  return GraphDb.fromState(state, sink: writer);
+  final db = GraphDb.fromState(state, sink: writer);
+  if (snapshotStore != null && checkpoint.isEnabled) {
+    CheckpointCoordinator(
+      db: db,
+      walStore: store,
+      snapshotStore: snapshotStore,
+      policy: checkpoint,
+    ).attach();
+  }
+  return db;
 }
 
 /// Truncates the WAL up to its current length.
