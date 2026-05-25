@@ -31,7 +31,8 @@ void main() {
       expect(db.hasLabel(ada, person!), isTrue);
       expect(db.getNodeStringProp(ada, name!), 'Ada');
       // read-your-writes via the string-resolved key
-      expect(db.findNodeByProp(person, name, const PropString('Ada'))?.value,
+      expect(
+          db.findNodeByProp(name, const PropString('Ada'), label: person)?.value,
           ada.value);
     });
 

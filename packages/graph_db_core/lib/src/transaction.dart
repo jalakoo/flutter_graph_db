@@ -8,10 +8,13 @@
 /// applicator. On rollback the buffer is dropped — any vids / eids
 /// allocated inside the body are **not** reused.
 ///
-/// **No read-your-writes.** Reads inside the body (`db.outDegree`,
-/// `db.getNodeProp`, etc.) see the **pre-commit** state. Sequence
-/// dependent reads across multiple txns. A future ACID-hardening pass
-/// may add snapshot isolation with proper read-your-writes.
+/// **No reads inside the body.** The high-level read API
+/// (`db.nodeCount`, `db.getNodeProp`, `db.labelScan`, traversal, the
+/// finders, …) throws a [StateError] if called while a transaction is in
+/// flight — a buffer-only txn would otherwise silently expose pre-commit
+/// state. Read before the transaction, or after it commits (committed
+/// writes are read-your-writes). A future ACID-hardening pass may add
+/// snapshot isolation with proper in-transaction read-your-writes.
 ///
 /// **No nesting, no concurrency.** single-writer model.
 /// `runTransaction` while a txn is in flight throws.

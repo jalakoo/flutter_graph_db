@@ -157,24 +157,41 @@ class GraphDb {
   int? edgeTypeId(String name) => _state.strings.edgeTypeIdOf(name);
   int? propKeyId(String name) => _state.strings.propKeyIdOf(name);
 
+  /// `_state`, guarded against in-transaction reads. The high-level
+  /// data-read API routes through this so a read issued inside a
+  /// `runTransaction` body — which would silently observe pre-commit
+  /// state (the txn is buffer-only) — throws instead of misleading the
+  /// caller. The allocation-free primitive range API and the
+  /// catalog/schema lookups use `_state` directly and are exempt.
+  MutableGraphState get _r {
+    if (_state.activeTxnId != null) {
+      throw StateError(
+        'read issued inside runTransaction: the transaction is buffer-only, '
+        'so this would return pre-commit state. Read before the transaction, '
+        'or after it commits — committed writes are read-your-writes.',
+      );
+    }
+    return _state;
+  }
+
   // -------------------------------------------------------------- topology
 
   /// Total node count. **Read-your-writes:** committed mutations are
   /// reflected immediately — no `mergeNow()` required. Matches the
   /// post-merge count exactly; deleted vids retain their slot (ids are
   /// never reused), so this can exceed the number of live logical nodes.
-  int get nodeCount => _state.effectiveNodeCount;
+  int get nodeCount => _r.effectiveNodeCount;
 
   /// Total edge count. Read-your-writes — committed adds and removals are
   /// reflected immediately, with no `mergeNow()`.
-  int get edgeCount => _state.effectiveEdgeCount;
+  int get edgeCount => _r.effectiveEdgeCount;
 
   /// Out-degree of [vid]. Read-your-writes (overlay-aware): O(1) on a
   /// clean overlay, O(degree) while writes are pending.
-  int outDegree(Vid vid) => _state.effectiveOutDegree(vid);
+  int outDegree(Vid vid) => _r.effectiveOutDegree(vid);
 
   /// In-degree of [vid]. Read-your-writes — see [outDegree].
-  int inDegree(Vid vid) => _state.effectiveInDegree(vid);
+  int inDegree(Vid vid) => _r.effectiveInDegree(vid);
 
   /// True when committed mutations are sitting in the overlay, not yet
   /// folded into the CSR. The read API is read-your-writes regardless, so
@@ -187,11 +204,11 @@ class GraphDb {
   /// True iff [vid] carries [labelId]. Overlay-aware. Allocation-free
   /// O(log k) where k is per-vid label count.
   bool hasLabel(Vid vid, int labelId) =>
-      _state.hasLabelEffective(vid, labelId);
+      _r.hasLabelEffective(vid, labelId);
 
   /// Full label-id set carried by [vid]. Overlay-aware. The returned
   /// iterable is a view — do not mutate.
-  Iterable<int> labelsOf(Vid vid) => _state.effectiveLabelsOf(vid);
+  Iterable<int> labelsOf(Vid vid) => _r.effectiveLabelsOf(vid);
 
   // ------------------------------------------------------------- traversal
   // Primitive range API — allocation-free, fastest on AOT.
@@ -229,7 +246,7 @@ class GraphDb {
     Vid vid,
     void Function(Vid dst, Eid eid, int edgeType) visit,
   ) {
-    _state.forEachOutEdge(
+    _r.forEachOutEdge(
       vid,
       (eid, dst, edgeType) => visit(dst, eid, edgeType),
     );
@@ -241,7 +258,7 @@ class GraphDb {
     Vid vid,
     void Function(Vid src, Eid eid, int edgeType) visit,
   ) {
-    _state.forEachInEdge(
+    _r.forEachInEdge(
       vid,
       (eid, src, edgeType) => visit(src, eid, edgeType),
     );
@@ -255,7 +272,7 @@ class GraphDb {
   /// zero-copy view into the pre-built CSR index; when the overlay is
   /// dirty it is a freshly-sorted copy folding in overlay-added nodes and
   /// label changes. Either way, do not mutate it.
-  Uint32List labelScan(int labelId) => _state.effectiveLabelScan(labelId);
+  Uint32List labelScan(int labelId) => _r.effectiveLabelScan(labelId);
 
   /// All vids carrying [labelId] as typed [Vid]s, ascending. The
   /// ergonomic companion to [labelScan] — a **lazy view** over the same
@@ -270,7 +287,7 @@ class GraphDb {
   /// }
   /// ```
   Iterable<Vid> labelScanVids(int labelId) =>
-      _state.effectiveLabelScan(labelId).map(Vid.new);
+      _r.effectiveLabelScan(labelId).map(Vid.new);
 
   // --------------------------------------------------------- property reads
   //
@@ -278,36 +295,36 @@ class GraphDb {
   // property store) or guards via [hasNodeProp] / [nodePropIsNull].
   // Use [getNodeProp] / [getEdgeProp] for the boxed boundary form.
 
-  bool hasNodeProp(Vid vid, int keyId) => _state.hasNodeProp(vid, keyId);
+  bool hasNodeProp(Vid vid, int keyId) => _r.hasNodeProp(vid, keyId);
   bool nodePropIsNull(Vid vid, int keyId) =>
-      _state.nodeProps.isNull(vid.value, keyId);
+      _r.nodeProps.isNull(vid.value, keyId);
   ColumnType? nodePropType(int keyId) =>
-      _state.nodeProps.columnType(keyId);
+      _state.nodeProps.columnType(keyId); // schema lookup — exempt
 
   int getNodeIntProp(Vid vid, int keyId) =>
-      _state.getNodeIntProp(vid, keyId);
+      _r.getNodeIntProp(vid, keyId);
   double getNodeDoubleProp(Vid vid, int keyId) =>
-      _state.getNodeDoubleProp(vid, keyId);
+      _r.getNodeDoubleProp(vid, keyId);
   bool getNodeBoolProp(Vid vid, int keyId) =>
-      _state.getNodeBoolProp(vid, keyId);
+      _r.getNodeBoolProp(vid, keyId);
   String getNodeStringProp(Vid vid, int keyId) =>
-      _state.getNodeStringProp(vid, keyId);
+      _r.getNodeStringProp(vid, keyId);
 
-  bool hasEdgeProp(Eid eid, int keyId) => _state.hasEdgeProp(eid, keyId);
+  bool hasEdgeProp(Eid eid, int keyId) => _r.hasEdgeProp(eid, keyId);
   ColumnType? edgePropType(int keyId) =>
-      _state.edgeProps.columnType(keyId);
+      _state.edgeProps.columnType(keyId); // schema lookup — exempt
 
   int getEdgeIntProp(Eid eid, int keyId) =>
-      _state.getEdgeIntProp(eid, keyId);
+      _r.getEdgeIntProp(eid, keyId);
   String getEdgeStringProp(Eid eid, int keyId) =>
-      _state.getEdgeStringProp(eid, keyId);
+      _r.getEdgeStringProp(eid, keyId);
 
   /// Boundary read — constructs and returns a [PropValue]. Allocates;
   /// use the typed primitive accessors above on the hot path.
   PropValue? getNodeProp(Vid vid, int keyId) =>
-      _state.nodeProps.getBoxed(vid.value, keyId);
+      _r.nodeProps.getBoxed(vid.value, keyId);
   PropValue? getEdgeProp(Eid eid, int keyId) =>
-      _state.edgeProps.getBoxed(eid.value, keyId);
+      _r.edgeProps.getBoxed(eid.value, keyId);
 
   // --------------------------------------------------------------- lookups
   //
@@ -317,24 +334,43 @@ class GraphDb {
   // graphs this engine targets; for large, equality-heavy workloads build
   // a secondary index ([createNodePropertyIndex]) and query it directly.
 
-  /// First node carrying [labelId] whose [keyId] property equals [value],
-  /// or `null` if none. **Read-your-writes** — committed mutations are
-  /// seen immediately. An absent or NULL property never matches a
-  /// non-null [value]. Boxes each candidate at the boundary; prefer the
-  /// typed accessors inside tight loops.
-  Vid? findNodeByProp(int labelId, int keyId, PropValue value) {
-    for (final raw in _state.effectiveLabelScan(labelId)) {
-      if (_state.nodeProps.getBoxed(raw, keyId) == value) return Vid(raw);
+  /// First node whose [keyId] property equals [value], or `null` if none.
+  ///
+  /// Pass [label] to scan only nodes carrying that label; omit it to scan
+  /// every node. **Read-your-writes** — committed mutations are seen
+  /// immediately. An absent or NULL property never matches a non-null
+  /// [value]. Boxes each candidate at the boundary; for lookup by a
+  /// unique id, prefer the O(1) [nodeByLogicalId].
+  Vid? findNodeByProp(int keyId, PropValue value, {int? label}) {
+    final s = _r;
+    if (label != null) {
+      for (final raw in s.effectiveLabelScan(label)) {
+        if (s.nodeProps.getBoxed(raw, keyId) == value) return Vid(raw);
+      }
+      return null;
+    }
+    final n = s.nextVid;
+    for (var v = 0; v < n; v++) {
+      if (s.nodeProps.getBoxed(v, keyId) == value) return Vid(v);
     }
     return null;
   }
 
-  /// Every node carrying [labelId] whose [keyId] property equals [value],
-  /// ascending by vid. Read-your-writes — see [findNodeByProp].
-  List<Vid> findNodesByProp(int labelId, int keyId, PropValue value) {
+  /// Every node whose [keyId] property equals [value], ascending by vid.
+  /// Pass [label] to restrict to that label. Read-your-writes — see
+  /// [findNodeByProp].
+  List<Vid> findNodesByProp(int keyId, PropValue value, {int? label}) {
+    final s = _r;
     final out = <Vid>[];
-    for (final raw in _state.effectiveLabelScan(labelId)) {
-      if (_state.nodeProps.getBoxed(raw, keyId) == value) out.add(Vid(raw));
+    if (label != null) {
+      for (final raw in s.effectiveLabelScan(label)) {
+        if (s.nodeProps.getBoxed(raw, keyId) == value) out.add(Vid(raw));
+      }
+    } else {
+      final n = s.nextVid;
+      for (var v = 0; v < n; v++) {
+        if (s.nodeProps.getBoxed(v, keyId) == value) out.add(Vid(v));
+      }
     }
     return out;
   }

@@ -35,10 +35,28 @@ void main() {
           labelIds: [company], props: {name: const PropString('Ada')}));
 
       // No mergeNow() — the lookup must already see the committed nodes.
-      expect(db.findNodeByProp(person, name, const PropString('Ada'))?.value,
+      expect(
+          db.findNodeByProp(name, const PropString('Ada'), label: person)?.value,
           ada.value);
-      expect(db.findNodeByProp(person, name, const PropString('Nobody')),
+      expect(db.findNodeByProp(name, const PropString('Nobody'), label: person),
           isNull);
+    });
+
+    test('label-free findNodeByProp scans across labels', () async {
+      final db = _db();
+      final person = db.internLabel('Person');
+      final company = db.internLabel('Company');
+      final name = db.internPropKey('name');
+
+      await db.runTransaction((txn) =>
+          txn.addNode(labelIds: [person], props: {name: const PropString('Ada')}));
+      final acme = await db.runTransaction((txn) => txn
+          .addNode(labelIds: [company], props: {name: const PropString('Acme')}));
+
+      // No label → finds the Company match even though it isn't a Person.
+      expect(db.findNodeByProp(name, const PropString('Acme'))?.value,
+          acme.value);
+      expect(db.findNodeByProp(name, const PropString('Nobody')), isNull);
     });
 
     test('findNodesByProp returns every match, ascending by vid', () async {
@@ -54,7 +72,9 @@ void main() {
           (txn) => txn.addNode(labelIds: [person], props: {age: const PropInt(31)}));
 
       expect(
-        db.findNodesByProp(person, age, const PropInt(30)).map((v) => v.value),
+        db
+            .findNodesByProp(age, const PropInt(30), label: person)
+            .map((v) => v.value),
         [a.value, b.value],
       );
     });
@@ -65,8 +85,10 @@ void main() {
       final name = db.internPropKey('name');
       await db.runTransaction((txn) => txn.addNode(labelIds: [person])); // no name
 
-      expect(db.findNodeByProp(person, name, const PropString('x')), isNull);
-      expect(db.findNodesByProp(person, name, const PropString('x')), isEmpty);
+      expect(db.findNodeByProp(name, const PropString('x'), label: person),
+          isNull);
+      expect(db.findNodesByProp(name, const PropString('x'), label: person),
+          isEmpty);
     });
 
     test('a deleted node drops out of the results (RYW)', () async {
@@ -75,12 +97,13 @@ void main() {
       final name = db.internPropKey('name');
       final ada = await db.runTransaction((txn) => txn
           .addNode(labelIds: [person], props: {name: const PropString('Ada')}));
-      expect(db.findNodeByProp(person, name, const PropString('Ada'))?.value,
+      expect(
+          db.findNodeByProp(name, const PropString('Ada'), label: person)?.value,
           ada.value);
 
       await db.runTransaction((txn) => txn.delNode(ada));
-      expect(
-          db.findNodeByProp(person, name, const PropString('Ada')), isNull);
+      expect(db.findNodeByProp(name, const PropString('Ada'), label: person),
+          isNull);
     });
   });
 }
