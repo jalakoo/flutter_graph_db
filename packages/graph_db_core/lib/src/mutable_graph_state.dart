@@ -932,11 +932,20 @@ class MutableGraphState {
     if (registry.containsKey(spec.name)) {
       throw ConstraintViolation('index "${spec.name}" already exists');
     }
+    // A declared valueType lets the index be built before any data
+    // exists: create the (empty) column of that type so the index has a
+    // concrete implementation to bind to and later writes are type-locked
+    // to it. `createColumn` is a no-op if the column already matches and
+    // throws if it conflicts — that's the type-mismatch guard.
+    if (spec.valueType != null) {
+      store.createColumn(spec.keyId, spec.valueType!);
+    }
     final colType = store.columnType(spec.keyId);
     if (colType == null) {
       throw ConstraintViolation(
-          'cannot build index "${spec.name}": no column declared for '
-          'keyId ${spec.keyId}');
+          'cannot build index "${spec.name}": no column exists for keyId '
+          '${spec.keyId}. Write the property first, or set '
+          'IndexSpec(valueType: …) to index ahead of any writes.');
     }
 
     final SecondaryIndex idx;

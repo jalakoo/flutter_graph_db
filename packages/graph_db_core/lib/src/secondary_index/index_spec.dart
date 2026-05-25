@@ -1,6 +1,8 @@
 /// Secondary-index registration types.
 library;
 
+import '../property_store.dart' show ColumnType;
+
 /// What kind of index to build. Sealed so v1 ships only [EqualityRange]
 /// and future versions can add `FullText`, `Vector`, etc. without
 /// breaking existing `createIndex` callers.
@@ -86,15 +88,26 @@ class IndexSpec {
   /// Persistence priority. Default [IndexPriority.low].
   final IndexPriority priority;
 
+  /// Optional explicit column type. The engine normally infers the type
+  /// from the column — but columns are created lazily on first write, so
+  /// on an **empty graph** no column exists yet and the engine can't pick
+  /// an index implementation. Declaring [valueType] lets you build the
+  /// index ahead of any writes: the engine creates the (empty) column of
+  /// this type, so the index is live from creation and a later write of a
+  /// different type to [keyId] is rejected. Leave `null` to index an
+  /// already-populated column (the default, data-driven path).
+  final ColumnType? valueType;
+
   const IndexSpec({
     required this.name,
     required this.keyId,
     required this.kind,
     this.priority = IndexPriority.low,
+    this.valueType,
   });
 
   @override
   String toString() =>
       'IndexSpec(name: $name, keyId: $keyId, kind: $kind, '
-      'priority: ${priority.name})';
+      'priority: ${priority.name}, valueType: $valueType)';
 }
