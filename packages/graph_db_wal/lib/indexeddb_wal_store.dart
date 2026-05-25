@@ -1,12 +1,17 @@
-/// Web-only entry point for the IndexedDB-backed `WalStore`
-///.
+/// Web-only entry point for the IndexedDB-backed `WalStore` and
+/// `SnapshotStore`.
 ///
 /// Consumers opt in:
 /// ```dart
 /// import 'package:graph_db_wal/indexeddb_wal_store.dart';
 ///
 /// final store = await openIndexedDbWalStore();
-/// final db = await openWalBackedGraphDb(store: store);
+/// final snaps = await openIndexedDbSnapshotStore();
+/// final db = await openWalBackedGraphDb(
+///   store: store,
+///   snapshotStore: snaps,
+///   checkpoint: CheckpointPolicy.auto(maxWalBytes: 1 << 20),
+/// );
 /// ```
 ///
 /// This file imports `dart:js_interop` + `package:web` and **only**
@@ -15,5 +20,7 @@
 /// export it.
 library;
 
+export 'src/indexeddb_snapshot_store.dart'
+    show IndexedDbSnapshotStore, openIndexedDbSnapshotStore;
 export 'src/indexeddb_wal_store.dart'
     show IndexedDbWalStore, openIndexedDbWalStore;
