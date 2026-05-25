@@ -25,7 +25,11 @@ adapters).
   into a fresh CSR and the main isolate installs via pointer swap.
   Web targets fall back to a synchronous main-isolate fold.
 - **Secondary indexes** — sorted-array equality + range indexes with
-  optional hash overlay + incremental inserts.
+  optional hash overlay + incremental inserts. Declare
+  `IndexSpec(valueType: …)` to build an index on an empty graph, before
+  the column exists.
+- **Logical-id index** — every node's `logicalId` is durably indexed:
+  `db.nodeByLogicalId(id)` (O(1), unique) and `db.getNodeLogicalId(vid)`.
 - **Constraint catalog** — `UniqueConstraint` / `ExistenceConstraint`
   enforced inside `runTransaction`.
 - **Snapshot codec** — `encodeSnapshot` / `decodeSnapshot` for a

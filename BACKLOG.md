@@ -116,6 +116,12 @@ and to close the deferrals above.
   WAL store; behind `package:graph_db_wal/indexeddb_wal_store.dart`.
   (Browser `-p chrome` test is a follow-up, as with the WAL adapter.)
 - **Built-in logical-id index** — see the (now ✅) P1 item above.
+- **`IndexSpec.valueType`** — declare a column type so
+  `createNodePropertyIndex` can build an (empty) typed index on an empty
+  graph instead of throwing; the column is pre-created so later writes
+  are type-locked to it. Closes the "can't index ahead of data" gap.
+  `graph_db_core` (`index_spec.dart`, `mutable_graph_state.dart`); test
+  `index_value_type_test.dart`.
 
 ## Done earlier this session (2026-05-24) — documentation papercuts
 

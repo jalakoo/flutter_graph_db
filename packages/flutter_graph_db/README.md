@@ -14,6 +14,7 @@ sync) live in separate packages and are imported explicitly.
 - [Install](#install)
 - [Quick start — in-memory](#quick-start--in-memory)
 - [Read-your-writes — the merge lifecycle](#read-your-writes--the-merge-lifecycle)
+- [Finding nodes](#finding-nodes)
 - [Mobile / desktop persistence](#mobile--desktop-persistence-ios--android--macos--windows--linux)
 - [Web persistence](#web-persistence-chrome--safari--firefox)
 - [Snapshot + compact cycle](#snapshot--compact-cycle-long-running-apps)
@@ -114,6 +115,12 @@ db.labelScan(person); // includes Ada
 `hasLabel` / `labelsOf`, and the GQL `MATCH` surface are all
 overlay-aware.
 
+Those reads are for **after** the transaction. Calling a high-level read
+**inside** a `runTransaction` body throws a `StateError` — the
+transaction is buffer-only, so an in-flight read would otherwise return
+stale pre-commit state. Read before the transaction, or after it
+returns.
+
 **The one exception** is the allocation-free *primitive range* API
 (`outRangeStart` / `outRangeEnd` / `outNeighborAt`, and the `in`
 equivalents). Those index straight into the CSR arrays, so they reflect
@@ -125,6 +132,28 @@ or just use `forEachOutNeighbor`, which is read-your-writes.
 
 Merges otherwise happen automatically once the overlay reaches
 `max(10_000, 5% of edges)`.
+
+## Finding nodes
+
+Look a node up by its stable id or any property — no hand-rolled `extId`
+property + index required:
+
+```dart
+// By logical id — the UUIDv7 addNode mints, or one you supply. O(1),
+// unique, works even on an empty graph.
+final v = db.nodeByLogicalId('user-42');     // Vid? — null if absent
+await db.runTransaction((txn) =>
+    txn.addNode(labelIds: [person], logicalId: 'user-42'));
+
+// By any property value — read-your-writes scan. Pass label: to scope
+// it to one label; omit to scan all.
+final ada = db.findNodeByProp(name, const PropString('Ada'), label: person);
+```
+
+For large, equality-heavy workloads, register a secondary index instead
+of the scan — `db.createNodePropertyIndex(IndexSpec(...))`. On an empty
+graph (no column yet) pass `IndexSpec(valueType: ColumnType.…)` so the
+index can be declared ahead of any writes.
 
 ## Mobile / desktop persistence (iOS / Android / macOS / Windows / Linux)
 

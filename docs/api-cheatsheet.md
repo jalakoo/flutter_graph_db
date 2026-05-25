@@ -137,7 +137,9 @@ when the presence/type isn't certain.
 
 Read-your-writes scans over the labelled set — saves the
 `labelScan` + per-vid compare boilerplate. O(n) in the label; for large
-equality-heavy workloads build a `createNodePropertyIndex` instead.
+equality-heavy workloads build a `createNodePropertyIndex` instead — on
+an empty graph (no column yet) pass `IndexSpec(valueType: ColumnType.…)`
+to declare the index ahead of any writes.
 
 | Call | Returns | Notes |
 |---|---|---|
