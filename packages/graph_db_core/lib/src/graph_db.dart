@@ -375,6 +375,26 @@ class GraphDb {
     return out;
   }
 
+  // ------------------------------------------------------------- logical id
+  //
+  // Every node carries a `logicalId` (the UUIDv7 minted by `addNode`, or
+  // the value you passed). The engine maintains a unique index over it,
+  // so there's no need to invent your own `extId` property + secondary
+  // index for stable-id lookups.
+
+  /// The logicalId of [vid] — null if it has none (e.g. a fixture node)
+  /// or was deleted. **Read-your-writes.**
+  String? getNodeLogicalId(Vid vid) => _r.logicalIdOf(vid.value);
+
+  /// The node currently holding [logicalId], or null. O(1) via the
+  /// built-in unique index. **Read-your-writes** — a node committed this
+  /// turn resolves immediately. logicalId is unique: adding a node with a
+  /// duplicate logicalId throws [ConstraintViolation].
+  Vid? nodeByLogicalId(String logicalId) {
+    final v = _r.vidOfLogicalId(logicalId);
+    return v == null ? null : Vid(v);
+  }
+
   // ----- Transactions --------------------
 
   /// Runs [body] inside a transaction.

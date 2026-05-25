@@ -96,6 +96,13 @@ class MutableGraphState {
   /// [activeTxnId] is non-null throws.
   int? activeTxnId;
 
+  /// Built-in logical-id index — `vid -> logicalId` and its reverse.
+  /// Maintained on every AddNode / DelNode (so it rebuilds for free
+  /// during WAL recovery) and persisted in the snapshot. logicalId is
+  /// unique: a duplicate is rejected at add time.
+  final Map<int, String> _logicalIdByVid = {};
+  final Map<String, int> _vidByLogicalId = {};
+
   MutableGraphState({
     required this.strings,
     required Csr csr,
@@ -153,6 +160,24 @@ class MutableGraphState {
   /// Next vid the allocator will issue. Read-only; mutate via
   /// [allocVid] (or have the applicator fast-forward via [applyAddNode]).
   int get nextVid => _nextVid;
+
+  /// logicalId of [vid], or null if it has none (e.g. a fixture-loaded
+  /// node) or was deleted. O(1).
+  String? logicalIdOf(int vid) => _logicalIdByVid[vid];
+
+  /// vid currently holding [logicalId], or null. O(1) — the built-in
+  /// unique logical-id index.
+  int? vidOfLogicalId(String logicalId) => _vidByLogicalId[logicalId];
+
+  /// Snapshot-encode hook — the live `vid -> logicalId` entries.
+  Map<int, String> get logicalIdEntries => _logicalIdByVid;
+
+  /// Snapshot-decode / recovery hook — restore one `vid <-> logicalId`
+  /// mapping. Codec-internal; not part of the mutation path.
+  void restoreLogicalId(int vid, String logicalId) {
+    _logicalIdByVid[vid] = logicalId;
+    _vidByLogicalId[logicalId] = vid;
+  }
 
   /// Next eid the allocator will issue. Read-only; mutate via
   /// [allocEid] (or have the applicator fast-forward via [applyAddEdge]).
@@ -456,6 +481,15 @@ class MutableGraphState {
     // Defensive dedupe + sort — caller bug shouldn't corrupt the
     // sorted-ascending row invariant (`Csr.hasLabel` relies on it).
     final sortedLabels = (Set<int>.of(labelIds).toList())..sort();
+    // Logical-id uniqueness pre-check (before any state mutation). A
+    // duplicate pointing at a *different* live vid is rejected; the same
+    // (vid, logicalId) re-applying is idempotent — recovery may replay an
+    // AddNode the snapshot already holds.
+    final dupVid = _vidByLogicalId[logicalId];
+    if (dupVid != null && dupVid != vid.value) {
+      throw ConstraintViolation(
+          'duplicate logicalId "$logicalId": already held by vid $dupVid');
+    }
     // Existence-constraint pre-check — fail before any property
     // writes so partial state isn't left behind. Applies per-label
     // (Neo4j-aligned: a constraint on L applies to any node carrying L).
@@ -469,6 +503,8 @@ class MutableGraphState {
       vid.value,
       AddedNode(logicalId: logicalId, labelIds: sortedLabels),
     );
+    _logicalIdByVid[vid.value] = logicalId;
+    _vidByLogicalId[logicalId] = vid.value;
     // Pre-check unique constraints across the whole prop bundle so
     // partial writes aren't left behind on rejection.
     for (final e in props.entries) {
@@ -502,6 +538,9 @@ class MutableGraphState {
       applyDelEdge(Eid(e));
     }
     overlay.recordDelNode(vid.value);
+    // Drop the logical-id mapping so the vid stops resolving.
+    final lid = _logicalIdByVid.remove(vid.value);
+    if (lid != null) _vidByLogicalId.remove(lid);
     // Properties of a deleted node are also gone — tombstone them
     // in the columnar store so the index rebuild doesn't pick them
     // up.

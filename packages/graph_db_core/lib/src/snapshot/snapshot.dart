@@ -99,6 +99,10 @@ const int _kVersion = 2;
     'nodeProps': _dumpPropertyStore(state.nodeProps),
     'edgeProps': _dumpPropertyStore(state.edgeProps),
     'constraints': _dumpConstraints(state.constraints.all.toList()),
+    // Built-in logical-id index, keyed by vid (as a JSON string key).
+    'logicalIds': {
+      for (final e in state.logicalIdEntries.entries) '${e.key}': e.value,
+    },
   };
   final bytes = Uint8List.fromList(utf8.encode(jsonEncode(root)));
   return (
@@ -229,6 +233,14 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
       keyId: c['keyId']! as int,
       kind: kind,
     );
+  }
+
+  // Built-in logical-id index. Absent in pre-logicalId snapshots — skip.
+  final lids = root['logicalIds'] as Map<String, Object?>?;
+  if (lids != null) {
+    for (final e in lids.entries) {
+      state.restoreLogicalId(int.parse(e.key), e.value! as String);
+    }
   }
   return state;
 }
