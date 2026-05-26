@@ -54,15 +54,24 @@ class EngineView {
     required List<String> edgeTypeNames,
     required List<String> propKeyNames,
   }) {
-    final personLabel = db.internLabel('Person');
-    final companyLabel = db.internLabel('Company');
-    final knowsEdge = db.internEdgeType('knows');
-    final worksAtEdge = db.internEdgeType('worksAt');
-    final foundedEdge = db.internEdgeType('founded');
-    final nameKey = db.internPropKey('name');
-    final ageKey = db.internPropKey('age');
-    final titleKey = db.internPropKey('title');
-    final foundedYearKey = db.internPropKey('foundedYear');
+    // One schema declaration replaces the per-name intern calls and
+    // reserves the typed columns up front. Types match what the loader
+    // writes (see `GraphData._setProp`): name/title are String, age and
+    // foundedYear are int — so these declarations no-op against the
+    // already-locked columns.
+    final schema = db.defineSchema(
+      labels: {'Person', 'Company'},
+      edgeTypes: {'knows', 'worksAt', 'founded'},
+      propKeys: {
+        'name': ColumnType.string,
+        'age': ColumnType.int_,
+        'title': ColumnType.string,
+        'foundedYear': ColumnType.int_,
+      },
+    );
+
+    final personLabel = schema.label('Person');
+    final companyLabel = schema.label('Company');
 
     final people = [
       for (final raw in db.labelScan(personLabel)) Vid(raw),
@@ -78,13 +87,13 @@ class EngineView {
       propKeyNames: propKeyNames,
       personLabel: personLabel,
       companyLabel: companyLabel,
-      knowsEdge: knowsEdge,
-      worksAtEdge: worksAtEdge,
-      foundedEdge: foundedEdge,
-      nameKey: nameKey,
-      ageKey: ageKey,
-      titleKey: titleKey,
-      foundedYearKey: foundedYearKey,
+      knowsEdge: schema.edgeType('knows'),
+      worksAtEdge: schema.edgeType('worksAt'),
+      foundedEdge: schema.edgeType('founded'),
+      nameKey: schema.propKey('name'),
+      ageKey: schema.propKey('age'),
+      titleKey: schema.propKey('title'),
+      foundedYearKey: schema.propKey('foundedYear'),
       people: people,
       companies: companies,
     );

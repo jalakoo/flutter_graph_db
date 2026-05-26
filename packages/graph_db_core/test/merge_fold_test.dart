@@ -191,23 +191,24 @@ void main() {
 
   group('GraphDb._commit triggers merge', () {
     test('commit past threshold installs a new CSR', () async {
-      final db = GraphDb.fromState(_baseline()..mergeThreshold = 1);
+      final state = _baseline()..mergeThreshold = 1;
+      final db = GraphDb.fromState(state);
       final lbl = db.internLabel('Node');
-      final csrBefore = db.state.csr;
+      final csrBefore = state.csr;
       await db.runTransaction((txn) {
         txn.addNode(labelIds: [lbl]);
       });
       // After commit, threshold (1 added edge or node? actual formula
       // counts added edges + deleted edges) — but we set
       // mergeThreshold=1 and added 0 edges, so no merge yet.
-      expect(db.state.csr, same(csrBefore));
+      expect(state.csr, same(csrBefore));
       await db.runTransaction((txn) {
         final v = txn.addNode(labelIds: [lbl]);
         txn.addEdge(src: const Vid(0), dst: v, typeId: 0);
       });
       // Now overlayMutationCount >= 1 → merge fires.
-      expect(db.state.csr, isNot(same(csrBefore)));
-      expect(db.state.overlay.isEmpty, isTrue);
+      expect(state.csr, isNot(same(csrBefore)));
+      expect(state.overlay.isEmpty, isTrue);
     });
   });
 
@@ -215,7 +216,8 @@ void main() {
   group('multi-label fold (PR 2)', () {
     test('overlay-added node with 3 labels lands in every label bucket',
         () async {
-      final db = GraphDb.fromState(_baseline()..mergeThreshold = 1);
+      final state = _baseline()..mergeThreshold = 1;
+      final db = GraphDb.fromState(state);
       final a = db.internLabel('A');
       final b = db.internLabel('B');
       final c = db.internLabel('C');
@@ -224,23 +226,24 @@ void main() {
         v = txn.addNode(labelIds: [a, b, c]);
         txn.addEdge(src: const Vid(0), dst: v, typeId: 0);
       });
-      expect(db.state.overlay.isEmpty, isTrue);
-      expect(db.state.csr.labelIndex[a], contains(v.value));
-      expect(db.state.csr.labelIndex[b], contains(v.value));
-      expect(db.state.csr.labelIndex[c], contains(v.value));
-      expect(db.state.csr.hasLabel(v.value, a), isTrue);
-      expect(db.state.csr.hasLabel(v.value, b), isTrue);
-      expect(db.state.csr.hasLabel(v.value, c), isTrue);
+      expect(state.overlay.isEmpty, isTrue);
+      expect(state.csr.labelIndex[a], contains(v.value));
+      expect(state.csr.labelIndex[b], contains(v.value));
+      expect(state.csr.labelIndex[c], contains(v.value));
+      expect(state.csr.hasLabel(v.value, a), isTrue);
+      expect(state.csr.hasLabel(v.value, b), isTrue);
+      expect(state.csr.hasLabel(v.value, c), isTrue);
       // Ragged labels round-trip — sorted ascending.
       expect(
-        db.state.csr.labelsOf(v.value).toList(),
+        state.csr.labelsOf(v.value).toList(),
         orderedEquals(<int>[a, b, c]..sort()),
       );
     });
 
     test('label-override (existing CSR vid) lands in fresh buckets',
         () async {
-      final db = GraphDb.fromState(_baseline()..mergeThreshold = 1);
+      final state = _baseline()..mergeThreshold = 1;
+      final db = GraphDb.fromState(state);
       final extra = db.internLabel('Vip');
       // vid 0 starts with label 0 in the baseline fixture. Add an
       // extra label and force a merge.
@@ -250,13 +253,13 @@ void main() {
         final v = txn.addNode(labelIds: [0]);
         txn.addEdge(src: const Vid(0), dst: v, typeId: 0);
       });
-      expect(db.state.overlay.isEmpty, isTrue);
+      expect(state.overlay.isEmpty, isTrue);
       // vid 0 should appear in both its original label-0 bucket AND
       // the new 'extra' bucket.
-      expect(db.state.csr.labelIndex[0], contains(0));
-      expect(db.state.csr.labelIndex[extra], contains(0));
-      expect(db.state.csr.hasLabel(0, 0), isTrue);
-      expect(db.state.csr.hasLabel(0, extra), isTrue);
+      expect(state.csr.labelIndex[0], contains(0));
+      expect(state.csr.labelIndex[extra], contains(0));
+      expect(state.csr.hasLabel(0, 0), isTrue);
+      expect(state.csr.hasLabel(0, extra), isTrue);
     });
   });
 }

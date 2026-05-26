@@ -13,6 +13,7 @@ import 'package:graph_db_core/graph_db_core.dart';
 import '../ast.dart';
 import '../diagnostics/planner_diagnostic.dart';
 import 'logical_plan.dart';
+import 'write_plan.dart';
 
 class PlannerException implements Exception {
   final String message;
@@ -22,13 +23,13 @@ class PlannerException implements Exception {
 }
 
 class GqlPlanner {
-  final GraphDb db;
+  final GraphReadView view;
 
   /// Optional non-fatal diagnostic sink. `null` ⇒ diagnostics are
   /// silently dropped (the planner still runs).
   final PlannerDiagnosticListener? onDiagnostic;
 
-  GqlPlanner(this.db, {this.onDiagnostic});
+  GqlPlanner(this.view, {this.onDiagnostic});
 
   void _emit(PlannerDiagnostic d) {
     final l = onDiagnostic;
@@ -46,6 +47,79 @@ class GqlPlanner {
           'read planner — pass through `executeQuery`',
         );
     }
+  }
+
+  /// Plans a *write* statement into a [WritePlan]. Mirrors [plan] for the
+  /// mutating path: `executeQuery` dispatches reads → [plan] + `GqlExecutor`,
+  /// writes → [planWrite] + `GqlWriteExecutor`. A4.1 handles `CREATE`;
+  /// MERGE / MATCH…SET land in A4.2 / A4.3.
+  WritePlan planWrite(GqlStatement stmt) {
+    switch (stmt) {
+      case CreateStatement():
+        return CreatePlan(
+          pattern: stmt.pattern,
+          returnClause: stmt.returnClause,
+        );
+      case MergeStatement():
+        return MergePlan(
+          node: stmt.pattern,
+          returnClause: stmt.returnClause,
+        );
+      case MatchStatement():
+        // MATCH … SET/DELETE. Plan the match twice, **once**: a passthrough
+        // binding plan (alias → Vid/Eid handles for the mutation step) and,
+        // when the statement has a RETURN, a projection plan over the
+        // post-mutation state (carrying ORDER BY / SKIP / LIMIT).
+        final bindingPlan = plan(MatchStatement(
+          patterns: stmt.patterns,
+          where: stmt.where,
+          returnClause: ReturnClause(
+            distinct: false,
+            items: _bindingsAsReturnItems(stmt.patterns),
+          ),
+        ));
+        final projectionPlan = stmt.returnClause == null
+            ? null
+            : plan(MatchStatement(
+                patterns: stmt.patterns,
+                where: stmt.where,
+                returnClause: stmt.returnClause,
+                orderBy: stmt.orderBy,
+                skip: stmt.skip,
+                limit: stmt.limit,
+              ));
+        return MutatePlan(
+          bindingPlan: bindingPlan,
+          mutations: stmt.mutations!,
+          projectionPlan: projectionPlan,
+        );
+    }
+  }
+
+  /// Synthesises a passthrough RETURN of every aliased binding in
+  /// [patterns] — used by [planWrite] so a MATCH…SET's binding plan yields
+  /// Vid/Eid handles rather than projected property values.
+  List<ReturnItem> _bindingsAsReturnItems(List<PatternPart> patterns) {
+    final out = <ReturnItem>[];
+    for (final p in patterns) {
+      if (p.start.alias != null) {
+        out.add(ReturnItem(
+          expr: IdentifierExpr(p.start.alias!),
+          alias: p.start.alias,
+        ));
+      }
+      for (final n in p.nodes) {
+        if (n.alias != null) {
+          out.add(ReturnItem(expr: IdentifierExpr(n.alias!), alias: n.alias));
+        }
+      }
+      for (final r in p.relationships) {
+        if (r.alias != null) {
+          out.add(ReturnItem(expr: IdentifierExpr(r.alias!), alias: r.alias));
+        }
+      }
+    }
+    return out;
   }
 
   LogicalPlan _planMatch(MatchStatement m) {
@@ -323,7 +397,7 @@ class GqlPlanner {
     if (labels.isEmpty) return null;
     final out = <int>[];
     for (final name in labels) {
-      final id = db.state.strings.labelIdOf(name);
+      final id = view.labelId(name);
       if (id == null) {
         throw PlannerException(
           'unknown label "$name" — intern it first or check the spelling',
@@ -337,7 +411,7 @@ class GqlPlanner {
 
   int? _resolveEdgeType(List<String> types) {
     if (types.isEmpty) return null;
-    final id = db.state.strings.edgeTypeIdOf(types.first);
+    final id = view.edgeTypeId(types.first);
     if (id == null) {
       throw PlannerException(
         'unknown edge type "${types.first}"',
@@ -376,7 +450,7 @@ class GqlPlanner {
   Expression _labelMatchPredicate(String alias, List<String> labels) {
     Expression? combined;
     for (final name in labels) {
-      final labelId = db.state.strings.labelIdOf(name);
+      final labelId = view.labelId(name);
       if (labelId == null) {
         throw PlannerException(
           'unknown label "$name" on expanded node — intern it first',

@@ -146,7 +146,7 @@ class SyncEngine {
 
     await for (final seq in reader.replay()) {
       if (seq.lsn <= target.hwm) continue;
-      final op = _walOpToImport(seq, db.state);
+      final op = _walOpToImport(seq);
       if (op == null) continue; // not a graph-shaped op (BeginTxn, etc.)
       pending.add(op);
       lastShippableLsn = seq.lsn;
@@ -216,53 +216,37 @@ class SyncEngine {
   /// clean base; the overlay represents already-committed state, so
   /// this is non-disruptive.
   Future<void> _seedTarget(SyncTarget target) async {
-    db.state.mergeNow();
+    db.mergeNow(); // export against a clean, overlay-empty base
+    final view = db.readView;
     final imports = <ImportOp>[];
-    // Nodes
-    for (var v = 0; v < db.state.csr.nodeCount; v++) {
-      if (!db.state.isNodeVisible(Vid(v))) continue;
-      final addedNode = db.state.overlay.addedNodes[v];
-      final logicalId = addedNode?.logicalId ?? 'local-$v';
-      final labels = _labelsForVid(Vid(v));
+    // Nodes. After the merge the overlay is empty, so every live node is
+    // a base-CSR row reached by index; the logicalId scheme is positional
+    // (`local-$v`). (The pre-A1 code also walked overlay-added nodes, but
+    // that set is always empty post-merge — dead after the merge above.)
+    for (var v = 0; v < db.nodeCount; v++) {
+      final vid = Vid(v);
+      if (!db.isNodeVisible(vid)) continue;
       imports.add(ImportNode(
-        logicalId: logicalId,
-        labels: labels,
-        properties: _collectProps(db.state.nodeProps, v),
+        logicalId: 'local-$v',
+        labels: _labelsForVid(vid),
+        properties: _collectNodeProps(vid),
       ));
     }
-    for (final entry in db.state.overlay.addedNodes.entries) {
-      final v = entry.key;
-      if (!db.state.isNodeVisible(Vid(v))) continue;
-      final labels = [
-        for (final id in entry.value.labelIds)
-          db.state.strings.labelOf(id) ?? '',
-      ]..removeWhere((l) => l.isEmpty);
-      imports.add(ImportNode(
-        logicalId: entry.value.logicalId,
-        labels: labels.isEmpty ? const ['Node'] : labels,
-        properties: _collectProps(db.state.nodeProps, v),
-      ));
-    }
-    // Edges (CSR base only — overlay edges are part of the WAL tail
-    // and get shipped via the normal drain).
-    final csr = db.state.csr;
-    for (var v = 0; v < csr.nodeCount; v++) {
-      if (!db.state.isNodeVisible(Vid(v))) continue;
-      final end = csr.rowPtrOut[v + 1];
-      for (var i = csr.rowPtrOut[v]; i < end; i++) {
-        final eid = csr.edgeIdOut[i];
-        final dst = csr.colIdxOut[i];
-        if (!db.state.isNodeVisible(Vid(dst))) continue;
-        final typeId = csr.edgeTypeOut[i];
-        final type = db.state.strings.edgeTypeOf(typeId) ?? 'Edge';
+    // Edges (overlay is empty post-merge; overlay edges ship via the
+    // normal WAL drain).
+    for (var v = 0; v < db.nodeCount; v++) {
+      final src = Vid(v);
+      if (!db.isNodeVisible(src)) continue;
+      view.forEachOutNeighbor(src, (dst, eid, typeId) {
+        if (!db.isNodeVisible(dst)) return;
         imports.add(ImportEdge(
-          logicalId: 'local-e-$eid',
+          logicalId: 'local-e-${eid.value}',
           srcLogicalId: 'local-$v',
-          dstLogicalId: 'local-$dst',
-          type: type,
-          properties: _collectProps(db.state.edgeProps, eid),
+          dstLogicalId: 'local-${dst.value}',
+          type: db.edgeTypeName(typeId) ?? 'Edge',
+          properties: _collectEdgeProps(eid),
         ));
-      }
+      });
     }
     await target.client.bulkImport(Stream.fromIterable(imports));
     target.seeded = true;
@@ -272,37 +256,46 @@ class SyncEngine {
   /// label names. Used by the sync seeding loop.
   List<String> _labelsForVid(Vid vid) {
     final out = <String>[
-      for (final id in db.state.effectiveLabelsOf(vid))
-        db.state.strings.labelOf(id) ?? '',
+      for (final id in db.labelsOf(vid)) db.labelName(id) ?? '',
     ]..removeWhere((l) => l.isEmpty);
     out.sort();
     return out.isEmpty ? const ['Node'] : out;
   }
 
-  Map<String, PropValue> _namedProps(
-    Map<int, PropValue> props,
-    MutableGraphState state,
-  ) {
+  Map<String, PropValue> _namedProps(Map<int, PropValue> props) {
     final out = <String, PropValue>{};
     for (final e in props.entries) {
-      final name = state.strings.propKeyOf(e.key);
+      final name = db.propKeyName(e.key);
       if (name != null) out[name] = e.value;
     }
     return out;
   }
 
-  Map<String, PropValue> _collectProps(PropertyStore store, int id) {
+  // The facade exposes no "every key set on id" iterator — walk the
+  // interned propKey space and probe. Fine for small graphs; for large
+  // ones the snapshot codec's per-column dump is more efficient (polish).
+  Map<String, PropValue> _collectNodeProps(Vid vid) {
     final out = <String, PropValue>{};
-    // PropertyStore doesn't expose a "every key set on id" iterator
-    // — walk the interner's propKey space and probe. v1 is fine
-    // for small graphs; for large graphs the snapshot codec's per-
-    // column dump pattern is more efficient (polish item).
-    final n = db.state.strings.propKeyCount;
+    final n = db.propKeyCount;
     for (var k = 0; k < n; k++) {
-      if (!store.has(id, k)) continue;
-      final v = store.getBoxed(id, k);
+      if (!db.hasNodeProp(vid, k)) continue;
+      final v = db.getNodeProp(vid, k);
       if (v == null) continue;
-      final keyName = db.state.strings.propKeyOf(k);
+      final keyName = db.propKeyName(k);
+      if (keyName == null) continue;
+      out[keyName] = v;
+    }
+    return out;
+  }
+
+  Map<String, PropValue> _collectEdgeProps(Eid eid) {
+    final out = <String, PropValue>{};
+    final n = db.propKeyCount;
+    for (var k = 0; k < n; k++) {
+      if (!db.hasEdgeProp(eid, k)) continue;
+      final v = db.getEdgeProp(eid, k);
+      if (v == null) continue;
+      final keyName = db.propKeyName(k);
       if (keyName == null) continue;
       out[keyName] = v;
     }
@@ -312,17 +305,17 @@ class SyncEngine {
   /// Converts a sequenced WAL op into the adapter-side [ImportOp]
   /// shape. Returns `null` for ops that don't map to a graph
   /// element (BeginTxn / CommitTxn / InternString / constraint ops).
-  ImportOp? _walOpToImport(SequencedWalOp seq, MutableGraphState state) {
+  ImportOp? _walOpToImport(SequencedWalOp seq) {
     final op = seq.op;
     switch (op) {
       case AddNode(:final logicalId, :final labelIds, :final props):
         final labels = <String>[
-          for (final id in labelIds) state.strings.labelOf(id) ?? '',
+          for (final id in labelIds) db.labelName(id) ?? '',
         ]..removeWhere((l) => l.isEmpty);
         return ImportNode(
           logicalId: logicalId,
           labels: labels.isEmpty ? const ['Node'] : labels,
-          properties: _namedProps(props, state),
+          properties: _namedProps(props),
         );
       case AddEdge(
           :final logicalId,
@@ -331,13 +324,13 @@ class SyncEngine {
           :final typeId,
           :final props,
         ):
-        final type = state.strings.edgeTypeOf(typeId) ?? 'Edge';
+        final type = db.edgeTypeName(typeId) ?? 'Edge';
         return ImportEdge(
           logicalId: logicalId,
           srcLogicalId: 'local-${src.value}',
           dstLogicalId: 'local-${dst.value}',
           type: type,
-          properties: _namedProps(props, state),
+          properties: _namedProps(props),
         );
       // DelNode / DelEdge / SetNodeProp / etc. — v1 push-only sync
       // ships them as a future "patch" op shape; for now they're

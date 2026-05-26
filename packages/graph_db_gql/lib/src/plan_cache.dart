@@ -1,19 +1,18 @@
 /// LRU plan cache.
 ///
-/// Caches the parser + planner output keyed by the raw query string.
-/// The cache is per-`GraphDb` (attached via an `Expando`) — different
-/// engines may resolve the same query to different plans because of
-/// distinct catalogs.
+/// Caches the parser + planner output keyed by the raw query string —
+/// either a read `LogicalPlan` or a write `WritePlan` (typed as [Object];
+/// the caller dispatches on the concrete type). The cache is per-`GraphDb`
+/// (attached via an `Expando`) — different engines may resolve the same
+/// query to different plans because of distinct catalogs.
 library;
-
-import 'plan/logical_plan.dart';
 
 /// Default cache size
 const int kDefaultPlanCacheSize = 64;
 
 class _LruEntry {
   final String key;
-  LogicalPlan plan;
+  Object plan;
   _LruEntry? prev;
   _LruEntry? next;
   _LruEntry(this.key, this.plan);
@@ -31,14 +30,14 @@ class GqlPlanCache {
 
   int get length => _map.length;
 
-  LogicalPlan? get(String query) {
+  Object? get(String query) {
     final entry = _map[query];
     if (entry == null) return null;
     _moveToFront(entry);
     return entry.plan;
   }
 
-  void put(String query, LogicalPlan plan) {
+  void put(String query, Object plan) {
     final existing = _map[query];
     if (existing != null) {
       existing.plan = plan;
@@ -53,7 +52,7 @@ class GqlPlanCache {
 
   /// Looks up [query] in the cache; if absent, calls [build] and
   /// stores the result. Returns the plan.
-  LogicalPlan getOrBuild(String query, LogicalPlan Function() build) {
+  Object getOrBuild(String query, Object Function() build) {
     final hit = get(query);
     if (hit != null) return hit;
     final plan = build();

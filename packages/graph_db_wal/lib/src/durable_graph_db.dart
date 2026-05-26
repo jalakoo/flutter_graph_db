@@ -68,10 +68,12 @@ Future<DurableGraphDb> openGraphDbAtPath(
   final walStore = await IoWalStore.open(path);
   final snapshotStore = await IoSnapshotStore.open('$path.snapshot');
 
-  // Restore the latest snapshot (if any), then replay the WAL on top.
-  // recoverInto's replay is idempotent, so a snapshot left ahead of an
-  // un-truncated WAL (crash between checkpoint's write and truncate)
-  // still recovers to the correct state.
+  // Restore the latest snapshot (if any), then replay the WAL tail on top.
+  // recoverInto LSN-gates the replay against the snapshot's high-water, so a
+  // snapshot left ahead of an un-truncated WAL (crash between the
+  // checkpoint's snapshot-write and WAL-truncate) recovers correctly: the
+  // snapshot-covered ops are skipped, not re-applied (which would otherwise
+  // double-count into the overlay).
   final snapshot = await snapshotStore.read();
   final db = await openWalBackedGraphDb(
     store: walStore,

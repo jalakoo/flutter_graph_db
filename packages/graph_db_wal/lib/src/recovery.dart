@@ -78,12 +78,20 @@ Future<void> recoverInto(
     if (seq.op is CommitTxn) committed.add(seq.txnId);
     if (seq.lsn > highestLsn) highestLsn = seq.lsn;
   }
-  // Second pass: replay only committed ops in LSN order. The reader
-  // already emits in WAL-append order which is LSN order, but
-  // re-sorting is cheap and defends against future segment-merge
-  // shuffling.
+  // Second pass: replay only committed ops in LSN order, skipping any the
+  // loaded snapshot already covers. A decoded snapshot restores `nextLsn`
+  // to its high-water mark; every WAL op below that floor was folded into
+  // the snapshot (and would be dropped by the post-snapshot WAL truncate).
+  // Without this gate, a crash between the checkpoint's snapshot-write and
+  // WAL-truncate leaves those covered ops in the WAL, and replaying them
+  // re-applies into the overlay on top of the snapshot's CSR — double-
+  // counting nodes/edges. For a fresh (no-snapshot) recovery the floor is 0,
+  // so everything replays. The reader already emits in LSN order, but
+  // re-sorting is cheap and defends against future segment-merge shuffling.
+  final coveredBelowLsn = state.nextLsn;
   ops.sort((a, b) => a.lsn.compareTo(b.lsn));
   for (final seq in ops) {
+    if (seq.lsn < coveredBelowLsn) continue; // already in the snapshot
     if (!committed.contains(seq.txnId)) continue;
     apply(state, seq, recovery: true);
   }

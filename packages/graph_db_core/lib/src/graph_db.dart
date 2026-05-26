@@ -7,6 +7,7 @@ import 'constraints/constraint_catalog.dart';
 import 'csr.dart';
 import 'durability.dart';
 import 'exceptions.dart';
+import 'graph_schema.dart';
 import 'identity/uuid_v7.dart';
 import 'ids.dart';
 import 'isolation.dart';
@@ -14,10 +15,12 @@ import 'merge/merge_fold.dart';
 import 'mutable_graph_state.dart';
 import 'overlay/delta_overlay.dart';
 import 'prop_value.dart';
+import 'read_view.dart';
 import 'property_store.dart';
 import 'secondary_index/index_size_event.dart';
 import 'secondary_index/index_spec.dart';
 import 'secondary_index/secondary_index.dart';
+import 'snapshot/snapshot.dart' show encodeSnapshot, SnapshotMeta;
 import 'string_interner.dart';
 import 'transaction.dart';
 import 'wal_op.dart';
@@ -92,13 +95,6 @@ class GraphDb {
     await _sink?.close();
   }
 
-  /// Underlying state — for advanced callers and tests.
-  MutableGraphState get state => _state;
-
-  /// CSR — exposed so callers writing extremely tight loops can index
-  /// the typed arrays directly.
-  Csr get csr => _state.csr;
-
   // ---------------------------------------------------------------- catalog
   //
   // Sync — the WAL is not touched here. Newly-interned strings are
@@ -148,6 +144,10 @@ class GraphDb {
   String? edgeTypeName(int id) => _state.strings.edgeTypeOf(id);
   String? propKeyName(int id) => _state.strings.propKeyOf(id);
 
+  /// Number of interned property keys. Catalog introspection for
+  /// exporters that enumerate the key space (e.g. the sync engine).
+  int get propKeyCount => _state.strings.propKeyCount;
+
   // Non-interning name → id resolvers. Unlike [internLabel] etc., these
   // never create a new catalog entry (and never touch the WAL): they
   // return the existing id or `null`. Use them to read by name without
@@ -157,22 +157,32 @@ class GraphDb {
   int? edgeTypeId(String name) => _state.strings.edgeTypeIdOf(name);
   int? propKeyId(String name) => _state.strings.propKeyIdOf(name);
 
-  /// `_state`, guarded against in-transaction reads. The high-level
-  /// data-read API routes through this so a read issued inside a
-  /// `runTransaction` body — which would silently observe pre-commit
-  /// state (the txn is buffer-only) — throws instead of misleading the
-  /// caller. The allocation-free primitive range API and the
-  /// catalog/schema lookups use `_state` directly and are exempt.
+  /// `_state`, guarded for in-transaction reads (**snapshot-at-start**).
+  /// The high-level data-read API routes through this. Before the active
+  /// txn's first write, reads return the committed-as-of-begin state.
+  /// After a write, a read throws — a buffer-only txn would otherwise
+  /// silently observe pre-write state (no read-your-writes). The
+  /// allocation-free primitive range API and the catalog/schema lookups
+  /// use `_state` directly and are exempt.
   MutableGraphState get _r {
-    if (_state.activeTxnId != null) {
+    if (_state.activeTxnId != null && _state.activeTxnHasWrites) {
       throw StateError(
-        'read issued inside runTransaction: the transaction is buffer-only, '
-        'so this would return pre-commit state. Read before the transaction, '
-        'or after it commits — committed writes are read-your-writes.',
+        'read issued after a write in the same runTransaction body: the '
+        'transaction is buffer-only, so this would return pre-write state. '
+        'Move the read before the first mutation, or split the transaction. '
+        '(Reads before the first write see the committed-as-of-begin '
+        'snapshot.)',
       );
     }
     return _state;
   }
+
+  /// Narrow, read-only window onto committed graph state — the seam the
+  /// GQL package reads through instead of the engine state. Deliberately
+  /// **unguarded** (backed by `_state`, not `_r`): a `MATCH … SET` can
+  /// evaluate a read-dependent right-hand side while mutations are
+  /// buffered in the same transaction. See [GraphReadView].
+  GraphReadView get readView => _state;
 
   // -------------------------------------------------------------- topology
 
@@ -198,8 +208,19 @@ class GraphDb {
   /// this is purely observability: it lets callers of the
   /// snapshot-semantics primitive range API (see below) tell when the CSR
   /// is stale relative to committed writes. Always `false` immediately
-  /// after `db.state.mergeNow()`.
+  /// after [mergeNow].
   bool get hasPendingWrites => !_state.overlay.isEmpty;
+
+  /// Forces an overlay merge into the CSR now. Normally unnecessary —
+  /// commits merge on a threshold — but snapshot/export paths call it to
+  /// work against a clean, overlay-empty base.
+  void mergeNow() => _state.mergeNow();
+
+  /// Encodes the current state as a snapshot (bytes + metadata). Requires
+  /// an empty overlay — call [mergeNow] first. Used by the WAL checkpoint
+  /// path so the snapshot codec stays internal to the facade.
+  ({Uint8List bytes, SnapshotMeta meta}) captureSnapshot() =>
+      encodeSnapshot(_state);
 
   /// True iff [vid] carries [labelId]. Overlay-aware. Allocation-free
   /// O(log k) where k is per-vid label count.
@@ -210,6 +231,10 @@ class GraphDb {
   /// iterable is a view — do not mutate.
   Iterable<int> labelsOf(Vid vid) => _r.effectiveLabelsOf(vid);
 
+  /// True iff [vid] is a live (non-deleted) node. Overlay-aware.
+  /// Exporters (e.g. the sync engine) use this to skip tombstoned slots.
+  bool isNodeVisible(Vid vid) => _r.isNodeVisible(vid);
+
   // ------------------------------------------------------------- traversal
   // Primitive range API — allocation-free, fastest on AOT.
   //
@@ -219,7 +244,7 @@ class GraphDb {
   // invisible here. This is the deliberate exception to the engine's
   // read-your-writes contract — the price of the zero-allocation
   // guarantee. For read-your-writes traversal use [forEachOutNeighbor] /
-  // [forEachInNeighbor], or call `db.state.mergeNow()` first.
+  // [forEachInNeighbor], or call [mergeNow] first.
   // [hasPendingWrites] reports when the CSR is stale relative to writes.
 
   int outRangeStart(Vid vid) => _state.outStart(vid);
@@ -437,6 +462,7 @@ class GraphDb {
     }
     final txnId = _state.allocTxnId();
     _state.activeTxnId = txnId;
+    _state.activeTxnHasWrites = false; // reads-before-write see committed state
     final txn = Transaction(
       txnId,
       _state,
@@ -589,6 +615,7 @@ class GraphDb {
     if (edges.isEmpty) return const [];
     final txnId = _state.allocTxnId();
     _state.activeTxnId = txnId;
+    _state.activeTxnHasWrites = true; // bulk write — reads must still throw
     try {
       // 1. Endpoint validation up front — fail fast before allocating.
       for (final e in edges) {
@@ -685,6 +712,36 @@ class GraphDb {
   /// a freshly-built index crosses the [kIndexSizeWarnThreshold]
   /// ratio of [Csr.sizeBytes]. Fired once per `createIndex()`.
   IndexSizeListener? onIndexSizeEvent;
+
+  /// Defines the catalog schema in one call and returns a reusable
+  /// [GraphSchema] handle: interns [labels], [edgeTypes], and [propKeys],
+  /// and reserves a typed node column for each declared prop key (so the
+  /// type is known before any write). The documented ergonomic entry
+  /// point; the string-keyed `txn.*Named` methods are the zero-setup
+  /// on-ramp.
+  ///
+  /// Non-transactional — interning and column declaration are direct
+  /// schema ops. Column declarations are not journaled, so call once after
+  /// each open: a re-declaration matching the persisted type no-ops, a
+  /// conflicting one throws [ConstraintViolation] (the recovery fail-fast).
+  GraphSchema defineSchema({
+    Set<String> labels = const {},
+    Set<String> edgeTypes = const {},
+    Map<String, ColumnType> propKeys = const {},
+  }) =>
+      GraphSchema(this,
+          labels: labels, edgeTypes: edgeTypes, propKeys: propKeys);
+
+  /// Declares a node-property column for [keyId] with [type] ahead of any
+  /// write, so the type is known before data exists — typed reads, the
+  /// finders, and [createNodePropertyIndex] can bind to an empty column.
+  /// Idempotent when the type matches; throws [ConstraintViolation] if
+  /// [keyId] already carries a column of a different type (the type-lock
+  /// guard). A non-transactional schema op, like [createNodePropertyIndex]:
+  /// column declarations are not journaled (they are rebuilt from data on
+  /// recovery), so re-declare on each open.
+  void declareNodeColumn(int keyId, ColumnType type) =>
+      _state.nodeProps.createColumn(keyId, type);
 
   /// Builds a node-property index from the current state. Fires
   /// [onIndexSizeEvent] if the new index is at or above the soft

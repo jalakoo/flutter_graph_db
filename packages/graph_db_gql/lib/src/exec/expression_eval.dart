@@ -21,10 +21,10 @@ class EvalException implements Exception {
 }
 
 class ExpressionEvaluator {
-  final GraphDb _db;
+  final GraphReadView _view;
   final Map<String, Object?> _params;
 
-  ExpressionEvaluator(this._db, this._params);
+  ExpressionEvaluator(this._view, this._params);
 
   Object? eval(Expression e, ResultRow row) {
     switch (e) {
@@ -105,8 +105,7 @@ class ExpressionEvaluator {
               'labels() expects a node, got ${v.runtimeType}');
         }
         final out = <String>[
-          for (final id in _db.state.effectiveLabelsOf(v))
-            _db.state.strings.labelOf(id) ?? '',
+          for (final id in _view.labelsOf(v)) _view.labelName(id) ?? '',
         ]..sort();
         return out;
     }
@@ -119,9 +118,9 @@ class ExpressionEvaluator {
         // Multi-label rollout PR 3: returns the labels list sorted
         // ascending by string (per §19.5 — UTF-16 code-unit order via
         // Dart's String.compareTo).
-        final ids = _db.state.effectiveLabelsOf(base);
+        final ids = _view.labelsOf(base);
         return [
-          for (final id in ids) _db.state.strings.labelOf(id) ?? '',
+          for (final id in ids) _view.labelName(id) ?? '',
         ]..sort();
       }
       throw EvalException('label predicate on non-node value');
@@ -134,20 +133,18 @@ class ExpressionEvaluator {
       final labelId = int.parse(
         key.substring(kInternalLabelContainsKeyPrefix.length),
       );
-      return _db.state.hasLabelEffective(base, labelId);
+      return _view.hasLabel(base, labelId);
     }
     if (base == null) return null;
-    final keyId = _db.state.strings.propKeyIdOf(key);
+    final keyId = _view.propKeyId(key);
     if (keyId == null) return null;
     if (base is Vid) {
       final vid = base as Vid;
-      if (!_db.state.nodeProps.has(vid.value, keyId)) return null;
-      return _unbox(_db.state.nodeProps.getBoxed(vid.value, keyId));
+      return _unbox(_view.nodeProp(vid, keyId));
     }
     if (base is Eid) {
       final eid = base as Eid;
-      if (!_db.state.edgeProps.has(eid.value, keyId)) return null;
-      return _unbox(_db.state.edgeProps.getBoxed(eid.value, keyId));
+      return _unbox(_view.edgeProp(eid, keyId));
     }
     throw EvalException(
         'property access on ${base.runtimeType} not supported');

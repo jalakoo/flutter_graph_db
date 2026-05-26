@@ -150,8 +150,14 @@ class CheckpointCoordinator {
     _busy = true;
     try {
       // --- synchronous, atomic capture (no await before the offset) ---
-      db.state.mergeNow(); // encodeSnapshot requires an empty overlay
-      final bytes = encodeSnapshot(db.state).bytes;
+      // Invariant: the snapshot's `nextLsn` and `truncateOffset` are taken
+      // from the *same* merged state, so they denote the same point in the
+      // log. Recovery LSN-gates WAL replay by the snapshot's `nextLsn`; if
+      // these two ever drifted, a crash between the snapshot-write and the
+      // truncate below would mis-skip (or double-apply) ops. Keep
+      // mergeNow → encodeSnapshot → length atomic (no await between them).
+      db.mergeNow(); // captureSnapshot requires an empty overlay
+      final bytes = db.captureSnapshot().bytes;
       final truncateOffset = walStore.length;
       _commitsSinceCheckpoint = 0;
       _walBytesAtLastCheckpoint = truncateOffset;

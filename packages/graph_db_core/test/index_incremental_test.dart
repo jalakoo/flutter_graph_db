@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:graph_db_core/graph_db_core.dart';
 import 'package:test/test.dart';
 
-GraphDb _db({int n = 100}) {
+({GraphDb db, MutableGraphState state}) _db({int n = 100}) {
   final state = MutableGraphState.fromFixture(
     nodeCount: n,
     srcs: Uint32List(0),
@@ -15,17 +15,17 @@ GraphDb _db({int n = 100}) {
     vidSpace: n + 16,
     eidSpace: 16,
   );
-  return GraphDb.fromState(state);
+  return (db: GraphDb.fromState(state), state: state);
 }
 
 void main() {
   group('5+: incremental insert/removeVid on IntEqualityRangeIndex', () {
     test('build of an incremental index populates the hash + vidToValue maps',
         () {
-      final db = _db(n: 5);
+      final (:db, :state) = _db(n: 5);
       final age = db.internPropKey('age');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setInt(i, age, 10 + i);
       }
       final idx = db.createNodePropertyIndex(IndexSpec(
         name: 'age',
@@ -42,10 +42,10 @@ void main() {
     });
 
     test('SetNodeProp mutates the index in place — no rebuild', () {
-      final db = _db(n: 5);
+      final (:db, :state) = _db(n: 5);
       final age = db.internPropKey('age');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setInt(i, age, 10 + i);
       }
       final idx = db.createNodePropertyIndex(IndexSpec(
         name: 'age',
@@ -54,7 +54,7 @@ void main() {
       ));
       // Same identity post-mutation — drop-and-rebuild would have
       // produced a NEW instance.
-      db.state.applySetNodeProp(const Vid(2), age, const PropInt(99));
+      state.applySetNodeProp(const Vid(2), age, const PropInt(99));
       expect(identical(db.getNodeIndex('age'), idx), isTrue);
       final mutated = db.getNodeIndex('age')! as IntEqualityRangeIndex;
       expect(mutated.length, 5);
@@ -64,17 +64,17 @@ void main() {
     });
 
     test('DelNodeProp removes the entry in place', () {
-      final db = _db(n: 5);
+      final (:db, :state) = _db(n: 5);
       final age = db.internPropKey('age');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setInt(i, age, 10 + i);
       }
       db.createNodePropertyIndex(IndexSpec(
         name: 'age',
         keyId: age,
         kind: const EqualityRange(incremental: true),
       ));
-      db.state.applyDelNodeProp(const Vid(2), age);
+      state.applyDelNodeProp(const Vid(2), age);
       final idx = db.getNodeIndex('age')! as IntEqualityRangeIndex;
       expect(idx.length, 4);
       expect(idx.equalsHash(12), isNull);
@@ -84,17 +84,17 @@ void main() {
     });
 
     test('DelNode drops the vid from every covering incremental index', () {
-      final db = _db(n: 5);
+      final (:db, :state) = _db(n: 5);
       final age = db.internPropKey('age');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setInt(i, age, 10 + i);
       }
       final idx = db.createNodePropertyIndex(IndexSpec(
         name: 'age',
         keyId: age,
         kind: const EqualityRange(incremental: true),
       ));
-      db.state.applyDelNode(const Vid(2));
+      state.applyDelNode(const Vid(2));
       // Same instance — no rebuild.
       expect(identical(db.getNodeIndex('age'), idx), isTrue);
       final mutated = db.getNodeIndex('age')! as IntEqualityRangeIndex;
@@ -104,18 +104,18 @@ void main() {
     });
 
     test('AddNode with props inserts incrementally — no rebuild', () {
-      final db = _db(n: 5);
+      final (:db, :state) = _db(n: 5);
       final age = db.internPropKey('age');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setInt(i, age, 10 + i);
       }
       final idx = db.createNodePropertyIndex(IndexSpec(
         name: 'age',
         keyId: age,
         kind: const EqualityRange(incremental: true),
       ));
-      final v = db.state.allocVid();
-      db.state.applyAddNode(
+      final v = state.allocVid();
+      state.applyAddNode(
         v,
         logicalId: 'new',
         labelIds: [0],
@@ -128,17 +128,17 @@ void main() {
     });
 
     test('non-int incremental indexes fall back to drop-and-rebuild', () {
-      final db = _db(n: 5);
+      final (:db, :state) = _db(n: 5);
       final name = db.internPropKey('name');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setString(i, name, 'n$i');
+        state.nodeProps.setString(i, name, 'n$i');
       }
       final idx = db.createNodePropertyIndex(IndexSpec(
         name: 'name',
         keyId: name,
         kind: const EqualityRange(incremental: true),
       ));
-      db.state.applySetNodeProp(const Vid(2), name, const PropString('zzz'));
+      state.applySetNodeProp(const Vid(2), name, const PropString('zzz'));
       // String column doesn't have an incremental path → fall back =
       // a fresh instance.
       expect(identical(db.getNodeIndex('name'), idx), isFalse);
@@ -146,10 +146,10 @@ void main() {
 
     test('mutations leave the sorted array dirty until a range query',
         () {
-      final db = _db(n: 5);
+      final (:db, :state) = _db(n: 5);
       final age = db.internPropKey('age');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setInt(i, age, 10 + i);
       }
       final idx = db.createNodePropertyIndex(IndexSpec(
         name: 'age',
@@ -158,7 +158,7 @@ void main() {
       )) as IntEqualityRangeIndex;
       // Mutate. The sorted array is now stale (the hash carries the
       // truth) — but equalsHash works immediately.
-      db.state.applySetNodeProp(const Vid(0), age, const PropInt(999));
+      state.applySetNodeProp(const Vid(0), age, const PropInt(999));
       expect(idx.equalsHash(999), isNotNull);
       // lowerBound triggers the lazy resort.
       expect(idx.lowerBound(999), 4);

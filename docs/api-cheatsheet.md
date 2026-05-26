@@ -32,7 +32,49 @@ the dartdoc — see [API reference](../README.md#api-reference).
 See the [umbrella README](../packages/flutter_graph_db/README.md) for
 the per-platform persistence wiring and the conditional import.
 
+## Schema & ergonomic tier — start here
+
+The API is tiered. **Most app code wants the ergonomic tier:** declare a
+schema once, then work in names and raw Dart values. The int-keyed catalog
+and `PropValue` methods below it are the allocation-conscious **hot path**
+(bulk import, inner loops) — reach for them when you measure a need.
+
+Declare the schema once after opening (re-declare on every open — it's a
+non-transactional, idempotent schema op; a type that conflicts with
+persisted data throws):
+
+```dart
+final s = db.defineSchema(
+  labels: {'Phrase', 'Context'},
+  edgeTypes: {'IN_CONTEXT', 'RELATES_TO'},
+  propKeys: {'name': ColumnType.string, 'score': ColumnType.double_},
+);
+```
+
+| Call | Returns | Notes |
+|---|---|---|
+| `db.defineSchema({labels, edgeTypes, propKeys})` | `GraphSchema` | Interns the names; reserves a typed column per declared prop key. `propKeys` maps name → `ColumnType`. |
+| `s.label(name)` / `s.edgeType(name)` / `s.propKey(name)` | `int` | Cached handle. Throws `ArgumentError` if `name` wasn't declared. |
+| `await s.add(label, {props}, {logicalId})` | `Vid` | Raw values boxed per column type: `int`→`double` promotes; lossy / mismatched types throw. Undeclared keys → strict-by-Dart-type. `null` → `PropNull`. |
+| `s.find(propKey, value, {label})` | `Vid?` | First match. Query value boxed like the write, so `find('score', 3)` matches a stored `3.0`. `label:` scopes the scan. |
+| `s.findAll(propKey, value, {label})` | `List<Vid>` | All matches, ascending. |
+| `s.outNeighbors(vid, edgeType)` / `s.inNeighbors(vid, edgeType)` | `List<Vid>` | Neighbours reached by one edge type. Read-your-writes. |
+
+```dart
+final v = await s.add('Phrase', {'name': 'こんにちは', 'score': 3}); // score → 3.0
+final hit = s.find('name', 'こんにちは');
+final related = s.outNeighbors(v, 'RELATES_TO');
+```
+
+> **Zero-setup on-ramp:** for scratch/tests, the string-keyed
+> `txn.addNodeNamed` / `setNodePropNamed` (under *Write*) auto-intern names
+> without a schema. Graduate to `defineSchema` for typed columns + cached
+> handles.
+
 ## Catalog / interning
+
+*Hot path / catalog primitives. The schema tier above wraps these — use them
+directly for bulk paths or when you hold int handles already.*
 
 | Call | Returns | Notes |
 |---|---|---|

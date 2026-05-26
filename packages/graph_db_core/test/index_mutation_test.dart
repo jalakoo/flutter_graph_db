@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:graph_db_core/graph_db_core.dart';
 import 'package:test/test.dart';
 
-GraphDb _smallDb({int nodeCount = 5}) {
+({GraphDb db, MutableGraphState state}) _smallDb({int nodeCount = 5}) {
   final state = MutableGraphState.fromFixture(
     nodeCount: nodeCount,
     srcs: Uint32List(0),
@@ -15,16 +15,16 @@ GraphDb _smallDb({int nodeCount = 5}) {
     vidSpace: 16,
     eidSpace: 16,
   );
-  return GraphDb.fromState(state);
+  return (db: GraphDb.fromState(state), state: state);
 }
 
 void main() {
   group('5A: index updates on mutation', () {
     test('SetNodeProp triggers index rebuild', () {
-      final db = _smallDb();
+      final (:db, :state) = _smallDb();
       final age = db.internPropKey('age');
-      db.state.nodeProps.setInt(0, age, 30);
-      db.state.nodeProps.setInt(1, age, 40);
+      state.nodeProps.setInt(0, age, 30);
+      state.nodeProps.setInt(1, age, 40);
       final idx = db.createNodePropertyIndex(IndexSpec(
         name: 'age',
         keyId: age,
@@ -32,36 +32,36 @@ void main() {
       )) as IntEqualityRangeIndex;
       expect(idx.length, 2);
       // Mutate via the applicator path (state-level)
-      db.state.applySetNodeProp(const Vid(2), age, const PropInt(35));
+      state.applySetNodeProp(const Vid(2), age, const PropInt(35));
       final refreshed = db.getNodeIndex('age')! as IntEqualityRangeIndex;
       expect(refreshed.length, 3);
       expect(refreshed.sortedValues, [30, 35, 40]);
     });
 
     test('DelNodeProp triggers index rebuild', () {
-      final db = _smallDb();
+      final (:db, :state) = _smallDb();
       final age = db.internPropKey('age');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setInt(i, age, 10 + i);
       }
       db.createNodePropertyIndex(IndexSpec(
         name: 'age',
         keyId: age,
         kind: const EqualityRange(),
       ));
-      db.state.applyDelNodeProp(const Vid(2), age);
+      state.applyDelNodeProp(const Vid(2), age);
       final refreshed = db.getNodeIndex('age')! as IntEqualityRangeIndex;
       expect(refreshed.length, 4);
       expect(refreshed.sortedValues, [10, 11, 13, 14]);
     });
 
     test('applyDelNode removes vid from every covering index', () {
-      final db = _smallDb();
+      final (:db, :state) = _smallDb();
       final age = db.internPropKey('age');
       final name = db.internPropKey('name');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
-        db.state.nodeProps.setString(i, name, 'n$i');
+        state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setString(i, name, 'n$i');
       }
       db.createNodePropertyIndex(IndexSpec(
         name: 'age',
@@ -73,7 +73,7 @@ void main() {
         keyId: name,
         kind: const EqualityRange(),
       ));
-      db.state.applyDelNode(const Vid(2));
+      state.applyDelNode(const Vid(2));
       final ageIdx = db.getNodeIndex('age')! as IntEqualityRangeIndex;
       final nameIdx = db.getNodeIndex('name')! as StringEqualityRangeIndex;
       expect(ageIdx.length, 4);
@@ -82,18 +82,18 @@ void main() {
     });
 
     test('AddNode with props lands in the index immediately', () {
-      final db = _smallDb();
+      final (:db, :state) = _smallDb();
       final age = db.internPropKey('age');
       for (var i = 0; i < 5; i++) {
-        db.state.nodeProps.setInt(i, age, 10 + i);
+        state.nodeProps.setInt(i, age, 10 + i);
       }
       db.createNodePropertyIndex(IndexSpec(
         name: 'age',
         keyId: age,
         kind: const EqualityRange(),
       ));
-      final v = db.state.allocVid();
-      db.state.applyAddNode(
+      final v = state.allocVid();
+      state.applyAddNode(
         v,
         logicalId: 'new',
         labelIds: [0],
@@ -105,10 +105,10 @@ void main() {
     });
 
     test('unique index rejects duplicate on SetNodeProp', () {
-      final db = _smallDb();
+      final (:db, :state) = _smallDb();
       final email = db.internPropKey('email');
-      db.state.nodeProps.setString(0, email, 'a@x');
-      db.state.nodeProps.setString(1, email, 'b@x');
+      state.nodeProps.setString(0, email, 'a@x');
+      state.nodeProps.setString(1, email, 'b@x');
       db.createNodePropertyIndex(IndexSpec(
         name: 'email_uq',
         keyId: email,
@@ -116,7 +116,7 @@ void main() {
       ));
       // Setting vid 2 to an existing value violates uniqueness.
       expect(
-        () => db.state.applySetNodeProp(
+        () => state.applySetNodeProp(
           const Vid(2),
           email,
           const PropString('a@x'),
@@ -124,14 +124,14 @@ void main() {
         throwsA(isA<ConstraintViolation>()),
       );
       // Existing index unchanged + the column write didn't happen.
-      expect(db.state.nodeProps.has(2, email), isFalse);
+      expect(state.nodeProps.has(2, email), isFalse);
     });
 
     test('unique index allows re-setting the same vid to the same value',
         () {
-      final db = _smallDb();
+      final (:db, :state) = _smallDb();
       final email = db.internPropKey('email');
-      db.state.nodeProps.setString(0, email, 'a@x');
+      state.nodeProps.setString(0, email, 'a@x');
       db.createNodePropertyIndex(IndexSpec(
         name: 'email_uq',
         keyId: email,
@@ -139,7 +139,7 @@ void main() {
       ));
       // Same vid + same value → idempotent, no throw.
       expect(
-        () => db.state.applySetNodeProp(
+        () => state.applySetNodeProp(
           const Vid(0),
           email,
           const PropString('a@x'),
@@ -149,9 +149,9 @@ void main() {
     });
 
     test('non-unique index allows duplicates', () {
-      final db = _smallDb();
+      final (:db, :state) = _smallDb();
       final age = db.internPropKey('age');
-      db.state.nodeProps.setInt(0, age, 30);
+      state.nodeProps.setInt(0, age, 30);
       db.createNodePropertyIndex(IndexSpec(
         name: 'age',
         keyId: age,
@@ -159,7 +159,7 @@ void main() {
       ));
       // Setting a duplicate value on a non-unique index — no throw.
       expect(
-        () => db.state.applySetNodeProp(
+        () => state.applySetNodeProp(
           const Vid(1),
           age,
           const PropInt(30),
@@ -171,17 +171,17 @@ void main() {
     });
 
     test('AddNode with unique prop rejects duplicate', () {
-      final db = _smallDb();
+      final (:db, :state) = _smallDb();
       final email = db.internPropKey('email');
-      db.state.nodeProps.setString(0, email, 'a@x');
+      state.nodeProps.setString(0, email, 'a@x');
       db.createNodePropertyIndex(IndexSpec(
         name: 'email_uq',
         keyId: email,
         kind: const EqualityRange(unique: true),
       ));
-      final v = db.state.allocVid();
+      final v = state.allocVid();
       expect(
-        () => db.state.applyAddNode(
+        () => state.applyAddNode(
           v,
           logicalId: 'dup',
           labelIds: [0],

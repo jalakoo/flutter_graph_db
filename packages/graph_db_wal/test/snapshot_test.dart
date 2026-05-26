@@ -99,8 +99,8 @@ void main() {
       final store = InMemoryWalStore();
       final db = await _seed(store);
       // Add a constraint so the snapshot carries the catalog.
-      final personLabel = db.state.strings.labelIdOf('Person')!;
-      final nameKey = db.state.strings.propKeyIdOf('name')!;
+      final personLabel = db.labelId('Person')!;
+      final nameKey = db.propKeyId('name')!;
       await db.runTransaction((txn) {
         txn.declareConstraint(UniqueConstraint(
           name: 'person_name_uq',
@@ -109,8 +109,8 @@ void main() {
         ));
       }, durability: Durability.fsync);
       // Merge before snapshot (codec invariant).
-      db.state.mergeNow();
-      final snap = encodeSnapshot(db.state);
+      db.mergeNow();
+      final snap = db.captureSnapshot();
       expect(snap.bytes.isNotEmpty, isTrue);
       expect(snap.meta.lsn, db.currentLsn);
 
@@ -130,28 +130,27 @@ void main() {
 
     test('encoding a non-empty overlay throws — caller must merge first',
         () {
-      final db = GraphDb.fromState(
-        MutableGraphState.fromFixture(
-          nodeCount: 0,
-          srcs: Uint32List(0),
-          dsts: Uint32List(0),
-          edgeTypes: Uint32List(0),
-          labelOf: Uint32List(0),
-          labelNames: const [],
-          edgeTypeNames: const [],
-          vidSpace: 16,
-          eidSpace: 16,
-        ),
+      final state = MutableGraphState.fromFixture(
+        nodeCount: 0,
+        srcs: Uint32List(0),
+        dsts: Uint32List(0),
+        edgeTypes: Uint32List(0),
+        labelOf: Uint32List(0),
+        labelNames: const [],
+        edgeTypeNames: const [],
+        vidSpace: 16,
+        eidSpace: 16,
       );
+      final db = GraphDb.fromState(state);
       final lbl = db.internLabel('L');
       // Use the state-level applier so we leave overlay dirty.
-      db.state.applyAddNode(
+      state.applyAddNode(
         const Vid(0),
         logicalId: 'x',
         labelIds: [lbl],
         props: const {},
       );
-      expect(() => encodeSnapshot(db.state),
+      expect(() => encodeSnapshot(state),
           throwsA(isA<StateError>()));
     });
   });
@@ -173,8 +172,8 @@ void main() {
     test('snapshot-then-truncate-then-restore round trip works', () async {
       final store = SegmentedInMemoryWalStore(segmentSize: 64);
       final db = await _seed(store);
-      db.state.mergeNow();
-      final snap = encodeSnapshot(db.state);
+      db.mergeNow();
+      final snap = db.captureSnapshot();
       // Truncate (segment-aligned; may not drop everything — that's
       // fine for the restore round-trip).
       await compactToCurrentTip(store: store);
@@ -185,9 +184,9 @@ void main() {
         snapshot: snap.bytes,
       );
       // State preserved.
-      final nameKey = db2.state.strings.propKeyIdOf('name')!;
-      expect(db2.state.csr.nodeCount, 2);
-      expect(db2.state.nodeProps.getString(0, nameKey), 'Ada');
+      final nameKey = db2.propKeyId('name')!;
+      expect(db2.nodeCount, 2);
+      expect(db2.getNodeStringProp(const Vid(0), nameKey), 'Ada');
       await db2.close();
     });
   });
@@ -217,8 +216,8 @@ void main() {
     test('crash mid-truncate doesn\'t lose the snapshot data', () async {
       final store = _CrashableStore();
       final db = await _seed(store);
-      db.state.mergeNow();
-      final snap = encodeSnapshot(db.state);
+      db.mergeNow();
+      final snap = db.captureSnapshot();
       store.failNextTruncate = true;
       await expectLater(
         () => compactToCurrentTip(store: store),
@@ -230,9 +229,34 @@ void main() {
         store: store,
         snapshot: snap.bytes,
       );
-      final nameKey = db2.state.strings.propKeyIdOf('name')!;
-      expect(db2.state.csr.nodeCount, 2);
-      expect(db2.state.nodeProps.getString(0, nameKey), 'Ada');
+      final nameKey = db2.propKeyId('name')!;
+      expect(db2.nodeCount, 2);
+      expect(db2.getNodeStringProp(const Vid(0), nameKey), 'Ada');
+      await db2.close();
+    });
+
+    test('crash mid-truncate: re-replayed covered ops do not double-count',
+        () async {
+      final store = _CrashableStore();
+      final db = await _seed(store); // 2 WAL-logged nodes (Ada, Bob)
+      db.mergeNow();
+      final snap = db.captureSnapshot();
+      store.failNextTruncate = true;
+      await expectLater(
+        () => compactToCurrentTip(store: store),
+        throwsA(isA<_SimulatedCrash>()),
+      );
+      // Crash left the snapshot durable but the WAL un-truncated — the two
+      // covered AddNode txns are still in the WAL and get replayed again on
+      // top of the snapshot's CSR.
+      store.reopen();
+      final db2 = await openWalBackedGraphDb(store: store, snapshot: snap.bytes);
+      final person = db2.internLabel('Person');
+      // The *effective* (public) count must stay 2 — not 4 from re-applying
+      // the snapshot-covered ops into the overlay.
+      expect(db2.nodeCount, 2,
+          reason: 'effective node count (csr + overlay) must not double-count');
+      expect(db2.labelScan(person).length, 2);
       await db2.close();
     });
   });

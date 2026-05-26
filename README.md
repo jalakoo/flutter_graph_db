@@ -48,9 +48,34 @@ dependencies:
       path: flutter_graph_db/packages/flutter_graph_db
 ```
 
-The file below opens a database and runs every basic verb —
-**import, initialize, write, read, edit, delete** — against the stable
-public API:
+**Most app code starts with the ergonomic schema tier.** Declare your
+labels, edge types, and typed property keys once, then work in names and
+raw Dart values — the engine interns the names, reserves typed columns, and
+boxes values for you:
+
+```dart
+import 'package:flutter_graph_db/flutter_graph_db.dart';
+
+final db = await openWalBackedGraphDb(store: InMemoryWalStore());
+final s = db.defineSchema(
+  labels: {'Person'},
+  edgeTypes: {'KNOWS'},
+  propKeys: {'name': ColumnType.string, 'score': ColumnType.double_},
+);
+
+final ada = await s.add('Person', {'name': 'Ada', 'score': 9}); // score → 9.0
+final bob = await s.add('Person', {'name': 'Bob'});
+await db.runTransaction((txn) =>
+    txn.addEdge(src: ada, dst: bob, typeId: s.edgeType('KNOWS')));
+
+print(s.find('name', 'Ada'));         // Vid?
+print(s.outNeighbors(ada, 'KNOWS'));  // [bob]
+```
+
+Need zero setup (scratch/tests)? `txn.addNodeNamed('Person', …)` auto-interns
+without a schema. Need the last drop of throughput (bulk import, inner
+loops)? Drop to the **int-keyed hot path** the schema tier wraps — the same
+verbs against the lowest-level stable API:
 
 ```dart
 import 'package:flutter_graph_db/flutter_graph_db.dart';

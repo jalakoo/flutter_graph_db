@@ -22,8 +22,8 @@ Future<GraphDb> _chainDb() async {
   db.internEdgeType('knows');
   final nameKey = db.internPropKey('name');
   for (var i = 0; i < 5; i++) {
-    db.state.csr.labelOf[i] = personLabel;
-    db.state.nodeProps.setString(i, nameKey, String.fromCharCode(0x41 + i));
+    state.csr.labelOf[i] = personLabel;
+    state.nodeProps.setString(i, nameKey, String.fromCharCode(0x41 + i));
   }
   await db.bulkAddEdges(
     const [

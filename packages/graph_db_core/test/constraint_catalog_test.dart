@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:graph_db_core/graph_db_core.dart';
 import 'package:test/test.dart';
 
-GraphDb _db({int n = 5}) {
+({GraphDb db, MutableGraphState state}) _db({int n = 5}) {
   final state = MutableGraphState.fromFixture(
     nodeCount: n,
     srcs: Uint32List(0),
@@ -15,17 +15,17 @@ GraphDb _db({int n = 5}) {
     vidSpace: n + 16,
     eidSpace: 16,
   );
-  return GraphDb.fromState(state);
+  return (db: GraphDb.fromState(state), state: state);
 }
 
 void main() {
   group('6C: constraint catalog', () {
     test('declareConstraint via txn registers the spec', () async {
-      final db = _db();
+      final (:db, :state) = _db();
       final personLabel = db.internLabel('Person');
       final emailKey = db.internPropKey('email');
       // Need a column declared so the auto-index creation can proceed
-      db.state.nodeProps.setString(0, emailKey, 'a@x');
+      state.nodeProps.setString(0, emailKey, 'a@x');
       await db.runTransaction((txn) {
         txn.declareConstraint(UniqueConstraint(
           name: 'person_email_uq',
@@ -42,11 +42,11 @@ void main() {
 
     test('declare validates existing data (unique rejects dups)',
         () async {
-      final db = _db();
+      final (:db, :state) = _db();
       final personLabel = db.internLabel('Person');
       final emailKey = db.internPropKey('email');
-      db.state.nodeProps.setString(0, emailKey, 'a@x');
-      db.state.nodeProps.setString(1, emailKey, 'a@x'); // duplicate
+      state.nodeProps.setString(0, emailKey, 'a@x');
+      state.nodeProps.setString(1, emailKey, 'a@x'); // duplicate
       await expectLater(
         () => db.runTransaction((txn) {
           txn.declareConstraint(UniqueConstraint(
@@ -63,11 +63,11 @@ void main() {
 
     test('declare validates existing data (existence rejects missing)',
         () async {
-      final db = _db();
+      final (:db, :state) = _db();
       final personLabel = db.internLabel('Person');
       final nameKey = db.internPropKey('name');
       // vid 0 has a name, vid 1 doesn't
-      db.state.nodeProps.setString(0, nameKey, 'Ada');
+      state.nodeProps.setString(0, nameKey, 'Ada');
       await expectLater(
         () => db.runTransaction((txn) {
           txn.declareConstraint(ExistenceConstraint(
@@ -81,7 +81,7 @@ void main() {
     });
 
     test('existence constraint rejects AddNode missing the key', () async {
-      final db = _db(n: 0);
+      final (:db, :state) = _db(n: 0);
       final personLabel = db.internLabel('Person');
       final nameKey = db.internPropKey('name');
       // Declare on an empty graph (no validation needed).
@@ -109,12 +109,12 @@ void main() {
       // The previously-rolled-back addNode consumed vid 0 per §3.6
       // (ids never reused); the successful one got vid 1.
       expect(v.value, 1);
-      expect(db.state.isNodeVisible(v), isTrue);
+      expect(state.isNodeVisible(v), isTrue);
     });
 
     test('existence constraint rejects DelNodeProp on a covered label',
         () async {
-      final db = _db(n: 0);
+      final db = _db(n: 0).db;
       final personLabel = db.internLabel('Person');
       final nameKey = db.internPropKey('name');
       await db.runTransaction((txn) {
@@ -140,7 +140,7 @@ void main() {
     });
 
     test('dropConstraint removes from catalog', () async {
-      final db = _db();
+      final db = _db().db;
       final personLabel = db.internLabel('Person');
       final nameKey = db.internPropKey('name');
       // Declare on empty data
@@ -159,7 +159,7 @@ void main() {
     });
 
     test('dropConstraint idempotent — unknown name no-op', () async {
-      final db = _db();
+      final db = _db().db;
       // Just ensures no throw.
       await db.runTransaction((txn) {
         txn.dropConstraint('does-not-exist');
@@ -170,7 +170,7 @@ void main() {
 
   group('6A: observable LSN', () {
     test('currentLsn / nextLsn advance with each commit', () async {
-      final db = _db();
+      final db = _db().db;
       final lsnBefore = db.nextLsn;
       await db.runTransaction((txn) {
         txn.addNode(labelIds: [0]);
@@ -181,7 +181,7 @@ void main() {
     });
 
     test('currentLsn is -1 when no op has been applied', () {
-      final db = _db();
+      final db = _db().db;
       expect(db.currentLsn, -1);
       expect(db.nextLsn, 0);
     });

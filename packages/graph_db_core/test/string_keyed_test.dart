@@ -3,22 +3,25 @@ import 'dart:typed_data';
 import 'package:graph_db_core/graph_db_core.dart';
 import 'package:test/test.dart';
 
-GraphDb _db() => GraphDb.fromState(MutableGraphState.fromFixture(
-      nodeCount: 0,
-      srcs: Uint32List(0),
-      dsts: Uint32List(0),
-      edgeTypes: Uint32List(0),
-      labelOf: Uint32List(0),
-      labelNames: const [],
-      edgeTypeNames: const [],
-      vidSpace: 64,
-      eidSpace: 64,
-    ));
+({GraphDb db, MutableGraphState state}) _db() {
+  final state = MutableGraphState.fromFixture(
+    nodeCount: 0,
+    srcs: Uint32List(0),
+    dsts: Uint32List(0),
+    edgeTypes: Uint32List(0),
+    labelOf: Uint32List(0),
+    labelNames: const [],
+    edgeTypeNames: const [],
+    vidSpace: 64,
+    eidSpace: 64,
+  );
+  return (db: GraphDb.fromState(state), state: state);
+}
 
 void main() {
   group('string-keyed overloads', () {
     test('addNodeNamed interns labels + keys; node is findable', () async {
-      final db = _db();
+      final db = _db().db;
       final ada = await db.runTransaction((txn) => txn.addNodeNamed(
             labels: ['Person'],
             props: {'name': const PropString('Ada')},
@@ -37,7 +40,7 @@ void main() {
     });
 
     test('addEdgeNamed interns the type + edge prop keys', () async {
-      final db = _db();
+      final db = _db().db;
       late final Vid a;
       late final Vid b;
       final eid = await db.runTransaction((txn) {
@@ -64,7 +67,7 @@ void main() {
     });
 
     test('setNodePropNamed interns the key', () async {
-      final db = _db();
+      final db = _db().db;
       final ada =
           await db.runTransaction((txn) => txn.addNodeNamed(labels: ['Person']));
       await db.runTransaction(
@@ -73,15 +76,15 @@ void main() {
     });
 
     test('name resolvers return null for unknown names', () {
-      final db = _db();
+      final db = _db().db;
       expect(db.labelId('Nope'), isNull);
       expect(db.edgeTypeId('Nope'), isNull);
       expect(db.propKeyId('Nope'), isNull);
     });
 
     test('string-keyed methods throw without a wired interner', () {
-      final db = _db();
-      final txn = Transaction(0, db.state); // no interners wired
+      final state = _db().state;
+      final txn = Transaction(0, state); // no interners wired
       expect(() => txn.addNodeNamed(labels: ['X']), throwsStateError);
     });
   });

@@ -118,9 +118,9 @@ Future<GraphDb> _socialDb() async {
   final c2 = await vidOf('Comment', 'text', 'text', 'c2');
   final c3 = await vidOf('Comment', 'text', 'text', 'c3');
 
-  final knowsType = db.state.strings.edgeTypeIdOf('KNOWS')!;
-  final createdType = db.state.strings.edgeTypeIdOf('CREATED')!;
-  final replyOfType = db.state.strings.edgeTypeIdOf('REPLY_OF')!;
+  final knowsType = state.strings.edgeTypeIdOf('KNOWS')!;
+  final createdType = state.strings.edgeTypeIdOf('CREATED')!;
+  final replyOfType = state.strings.edgeTypeIdOf('REPLY_OF')!;
   await db.bulkAddEdges(
     [
       BulkEdge(src: alice, dst: bob, typeId: knowsType),

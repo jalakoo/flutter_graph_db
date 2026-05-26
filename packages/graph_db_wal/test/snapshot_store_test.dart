@@ -16,8 +16,8 @@ Future<({Uint8List bytes, int personLabel})> _encodedFixture() async {
     txn.addNode(labelIds: [person], props: {name: const PropString('Ada')});
     txn.addNode(labelIds: [person], props: {name: const PropString('Bob')});
   });
-  db.state.mergeNow(); // encodeSnapshot requires an empty overlay
-  final snap = encodeSnapshot(db.state);
+  db.mergeNow(); // captureSnapshot requires an empty overlay
+  final snap = db.captureSnapshot();
   await db.close();
   return (bytes: snap.bytes, personLabel: person);
 }

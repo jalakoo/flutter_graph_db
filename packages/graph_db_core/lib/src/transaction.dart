@@ -8,13 +8,14 @@
 /// applicator. On rollback the buffer is dropped — any vids / eids
 /// allocated inside the body are **not** reused.
 ///
-/// **No reads inside the body.** The high-level read API
+/// **Reads inside the body: snapshot-at-start only.** A high-level read
 /// (`db.nodeCount`, `db.getNodeProp`, `db.labelScan`, traversal, the
-/// finders, …) throws a [StateError] if called while a transaction is in
-/// flight — a buffer-only txn would otherwise silently expose pre-commit
-/// state. Read before the transaction, or after it commits (committed
-/// writes are read-your-writes). A future ACID-hardening pass may add
-/// snapshot isolation with proper in-transaction read-your-writes.
+/// finders, …) issued *before the first mutation* returns the
+/// committed-as-of-begin snapshot. Once the txn has buffered a write, a
+/// further read throws a [StateError] — a buffer-only txn cannot offer
+/// read-your-writes, so a post-write read would silently expose pre-write
+/// state. Read before mutating, or split the transaction. (No MVCC; the
+/// engine stays single-writer.)
 ///
 /// **No nesting, no concurrency.** single-writer model.
 /// `runTransaction` while a txn is in flight throws.
@@ -79,6 +80,16 @@ class Transaction {
     }
   }
 
+  /// Buffers an op and flags the active transaction as having written.
+  /// Once a txn has written, a subsequent high-level read throws:
+  /// snapshot-at-start only guarantees committed-as-of-begin state, never
+  /// read-your-writes, so a read after a write would silently observe
+  /// pre-write state.
+  void _record(WalOp op) {
+    _buffer.add(op);
+    _state.activeTxnHasWrites = true;
+  }
+
   // ----- node mutations -----
 
   /// Allocates a fresh vid, buffers an `AddNode` op, returns the vid.
@@ -90,7 +101,7 @@ class Transaction {
   }) {
     _check();
     final vid = _state.allocVid();
-    _buffer.add(AddNode(
+    _record(AddNode(
       vid: vid,
       logicalId: logicalId ?? newUuidV7(),
       labelIds: List.unmodifiable(labelIds),
@@ -101,7 +112,7 @@ class Transaction {
 
   void delNode(Vid vid) {
     _check();
-    _buffer.add(DelNode(vid));
+    _record(DelNode(vid));
   }
 
   void setNodeLabels(
@@ -110,7 +121,7 @@ class Transaction {
     required List<int> removed,
   }) {
     _check();
-    _buffer.add(SetNodeLabels(
+    _record(SetNodeLabels(
       vid: vid,
       added: List.unmodifiable(added),
       removed: List.unmodifiable(removed),
@@ -131,7 +142,7 @@ class Transaction {
         (capturePrevValues
             ? _state.nodeProps.getBoxed(vid.value, keyId)
             : null);
-    _buffer.add(SetNodeProp(
+    _record(SetNodeProp(
       vid: vid,
       keyId: keyId,
       value: value,
@@ -141,7 +152,7 @@ class Transaction {
 
   void delNodeProp(Vid vid, int keyId) {
     _check();
-    _buffer.add(DelNodeProp(vid: vid, keyId: keyId));
+    _record(DelNodeProp(vid: vid, keyId: keyId));
   }
 
   // ----- edge mutations -----
@@ -156,7 +167,7 @@ class Transaction {
   }) {
     _check();
     final eid = _state.allocEid();
-    _buffer.add(AddEdge(
+    _record(AddEdge(
       eid: eid,
       logicalId: logicalId ?? newUuidV7(),
       src: src,
@@ -169,7 +180,7 @@ class Transaction {
 
   void delEdge(Eid eid) {
     _check();
-    _buffer.add(DelEdge(eid));
+    _record(DelEdge(eid));
   }
 
   void setEdgeProp(
@@ -183,7 +194,7 @@ class Transaction {
         (capturePrevValues
             ? _state.edgeProps.getBoxed(eid.value, keyId)
             : null);
-    _buffer.add(SetEdgeProp(
+    _record(SetEdgeProp(
       eid: eid,
       keyId: keyId,
       value: value,
@@ -193,7 +204,7 @@ class Transaction {
 
   void delEdgeProp(Eid eid, int keyId) {
     _check();
-    _buffer.add(DelEdgeProp(eid: eid, keyId: keyId));
+    _record(DelEdgeProp(eid: eid, keyId: keyId));
   }
 
   // ----- string-keyed convenience overloads -----
@@ -283,7 +294,7 @@ class Transaction {
       UniqueConstraint() => ConstraintKind.unique,
       ExistenceConstraint() => ConstraintKind.existence,
     };
-    _buffer.add(DeclareConstraint(
+    _record(DeclareConstraint(
       name: spec.name,
       labelId: spec.labelId,
       keyId: spec.keyId,
@@ -294,7 +305,7 @@ class Transaction {
   /// Drops the constraint named [name] (idempotent — see).
   void dropConstraint(String name) {
     _check();
-    _buffer.add(DropConstraint(name: name));
+    _record(DropConstraint(name: name));
   }
 
   void _markTerminated() {

@@ -10,7 +10,7 @@ import 'package:test/test.dart';
 ///   bob      --knows--> charlie
 ///   charlie  --knows--> dave(28)
 ///   dave     --knows--> eve(22)
-Future<GraphDb> _peopleDb() async {
+Future<({GraphDb db, MutableGraphState state})> _peopleDb() async {
   final state = MutableGraphState.fromFixture(
     nodeCount: 5,
     srcs: Uint32List(0),
@@ -32,13 +32,13 @@ Future<GraphDb> _peopleDb() async {
   final names = ['Alice', 'Bob', 'Charlie', 'Dave', 'Eve'];
   final ages = [30, 25, 40, 28, 22];
   for (var i = 0; i < 5; i++) {
-    db.state.csr.labelOf[i] = personLabel;
-    db.state.nodeProps.setString(i, nameKey, names[i]);
-    db.state.nodeProps.setInt(i, ageKey, ages[i]);
+    state.csr.labelOf[i] = personLabel;
+    state.nodeProps.setString(i, nameKey, names[i]);
+    state.nodeProps.setInt(i, ageKey, ages[i]);
   }
   // Rebuild labelIndex now that labelOf was patched (csr was built
   // with default label 0; we just confirmed it's the Person label).
-  final lbl = db.state.csr.labelIndex[personLabel] ?? Uint32List(0);
+  final lbl = state.csr.labelIndex[personLabel] ?? Uint32List(0);
   // sanity — all 5 people should already be present in the seeded
   // single-label index.
   expect(lbl.length, 5);
@@ -54,13 +54,13 @@ Future<GraphDb> _peopleDb() async {
     ],
     durability: Durability.none,
   );
-  return db;
+  return (db: db, state: state);
 }
 
 void main() {
   group('NodeScan + Project', () {
     test('returns every Person', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery('MATCH (n:Person) RETURN n.name');
       expect(r.columns, ['n.name']);
       final names = r.rows.map((x) => x.values['n.name']).toList();
@@ -68,7 +68,7 @@ void main() {
     });
 
     test('RETURN with AS alias', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         'MATCH (n:Person) RETURN n.name AS who',
       );
@@ -77,7 +77,7 @@ void main() {
     });
 
     test('full scan (no label)', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery('MATCH (n) RETURN n.name');
       expect(r.length, 5);
     });
@@ -85,7 +85,7 @@ void main() {
 
   group('WHERE filtering', () {
     test('numeric comparison', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         'MATCH (n:Person) WHERE n.age > 28 RETURN n.name',
       );
@@ -94,7 +94,7 @@ void main() {
     });
 
     test('AND / OR composition', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         'MATCH (n:Person) WHERE n.age > 25 AND n.age < 40 RETURN n.name',
       );
@@ -103,7 +103,7 @@ void main() {
     });
 
     test('string equality', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         "MATCH (n:Person) WHERE n.name = 'Bob' RETURN n.age",
       );
@@ -111,7 +111,7 @@ void main() {
     });
 
     test('inline property pattern lowers to a WHERE', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         "MATCH (n:Person {name: 'Bob'}) RETURN n.age",
       );
@@ -121,7 +121,7 @@ void main() {
 
   group('Expand (relationship patterns)', () {
     test('outgoing -[:knows]->', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         'MATCH (a:Person)-[:knows]->(b:Person) '
         "WHERE a.name = 'Alice' RETURN b.name",
@@ -131,7 +131,7 @@ void main() {
     });
 
     test('incoming <-[:knows]-', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         'MATCH (a:Person)<-[:knows]-(b:Person) '
         "WHERE a.name = 'Charlie' RETURN b.name",
@@ -141,7 +141,7 @@ void main() {
     });
 
     test('chained pattern (a)-[:knows]->(b)-[:knows]->(c)', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         'MATCH (a:Person)-[:knows]->(b:Person)-[:knows]->(c:Person) '
         "WHERE a.name = 'Alice' RETURN c.name",
@@ -152,7 +152,7 @@ void main() {
     });
 
     test('edge alias bindable in RETURN as the eid', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         'MATCH (a:Person)-[r:knows]->(b:Person) RETURN r',
       );
@@ -164,7 +164,7 @@ void main() {
 
   group('DISTINCT + parse / plan errors', () {
     test('DISTINCT de-duplicates result rows', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final r = await db.executeQuery(
         // Same age (28) shared by no two people, so we re-derive a
         // duplicate by projecting just the label-side of every edge.
@@ -177,7 +177,7 @@ void main() {
     });
 
     test('unknown label is a plan error', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       await expectLater(
         () => db.executeQuery('MATCH (n:NoSuchLabel) RETURN n'),
         throwsA(isA<PlannerException>()),
@@ -185,7 +185,7 @@ void main() {
     });
 
     test('multi-pattern MATCH deferred → plan error', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       await expectLater(
         () => db.executeQuery(
             'MATCH (a:Person), (b:Person) RETURN a, b'),
@@ -198,13 +198,13 @@ void main() {
 
   group('multi-label patterns + functions (PR 3)', () {
     test('(:A:B) AND-matches only nodes carrying both labels', () async {
-      final db = await _peopleDb();
+      final (:db, :state) = await _peopleDb();
       final employeeLabel = db.internLabel('Employee');
       await db.runTransaction((txn) {
         txn.setNodeLabels(const Vid(0),
             added: [employeeLabel], removed: const []);
       });
-      db.state.mergeNow();
+      state.mergeNow();
 
       final both = await db.executeQuery(
         'MATCH (n:Person:Employee) RETURN n.name',
@@ -223,13 +223,13 @@ void main() {
 
     test('labels(n) returns sorted-ascending list of label names',
         () async {
-      final db = await _peopleDb();
+      final (:db, :state) = await _peopleDb();
       final employeeLabel = db.internLabel('Employee');
       await db.runTransaction((txn) {
         txn.setNodeLabels(const Vid(0),
             added: [employeeLabel], removed: const []);
       });
-      db.state.mergeNow();
+      state.mergeNow();
 
       final r = await db.executeQuery(
         "MATCH (n:Person) WHERE n.name = 'Alice' RETURN labels(n) AS ls",
@@ -241,13 +241,13 @@ void main() {
     });
 
     test('CREATE (n:A:B) lands both labels', () async {
-      final db = await _peopleDb();
+      final (:db, :state) = await _peopleDb();
       db.internLabel('Tagged');
       db.internLabel('Person');
       await db.executeQuery(
         "CREATE (n:Person:Tagged {name: 'multi'})",
       );
-      db.state.mergeNow();
+      state.mergeNow();
       final r = await db.executeQuery(
         "MATCH (n:Person:Tagged) RETURN labels(n) AS ls",
       );
@@ -261,7 +261,7 @@ void main() {
 
   group('PlannerDiagnostic — node.label deprecation (PR 3 / §19.10.2)', () {
     test('reading n.label inside RETURN fires a warning', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       final diags = <PlannerDiagnostic>[];
       db.onPlannerDiagnostic = diags.add;
       try {
@@ -280,7 +280,7 @@ void main() {
     });
 
     test('default listener is silent (no listener set)', () async {
-      final db = await _peopleDb();
+      final (:db, state: _) = await _peopleDb();
       try {
         await db.executeQuery('MATCH (n:Person) RETURN n.name');
       } catch (e) {

@@ -26,10 +26,10 @@ Future<GraphDb> _peopleDb() async {
   final ages = [30, 25, 40, 28, 22];
   final cities = ['NYC', 'NYC', 'SF', 'NYC', 'SF'];
   for (var i = 0; i < 5; i++) {
-    db.state.csr.labelOf[i] = personLabel;
-    db.state.nodeProps.setString(i, nameKey, names[i]);
-    db.state.nodeProps.setInt(i, ageKey, ages[i]);
-    db.state.nodeProps.setString(i, cityKey, cities[i]);
+    state.csr.labelOf[i] = personLabel;
+    state.nodeProps.setString(i, nameKey, names[i]);
+    state.nodeProps.setInt(i, ageKey, ages[i]);
+    state.nodeProps.setString(i, cityKey, cities[i]);
   }
   return db;
 }

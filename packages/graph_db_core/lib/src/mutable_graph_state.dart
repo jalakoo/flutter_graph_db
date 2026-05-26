@@ -11,6 +11,8 @@ import 'merge/merge_fold.dart';
 import 'overlay/delta_overlay.dart';
 import 'prop_value.dart';
 import 'property_store.dart';
+import 'read_view.dart';
+import 'secondary_index/index_registry.dart';
 import 'secondary_index/index_size_event.dart';
 import 'secondary_index/index_spec.dart';
 import 'secondary_index/index_worker.dart';
@@ -28,7 +30,7 @@ import 'wal_op.dart' show ConstraintKind;
 /// + [PropertyStore]. The `outRangeStart` / `outRangeEnd` pair is the
 /// **primitive range read API** — allocation-free, the simplest, and
 /// the fastest on AOT.
-class MutableGraphState {
+class MutableGraphState implements GraphReadView {
   final StringInterner strings;
   Csr _csr;
   final PropertyStore nodeProps;
@@ -72,6 +74,13 @@ class MutableGraphState {
   /// call runs the rebuild inline.
   IndexRebuildCoordinator? indexRebuildCoordinator;
 
+  /// Owns the secondary-index maps and the enforce→write→maintain
+  /// sequence (plan A2). The mutation sites delegate to it; the public
+  /// index methods below forward to it. Wired with narrow deps — the two
+  /// property stores plus closures over [indexRebuildCoordinator] and
+  /// `csr.sizeBytes` — so it holds no back-reference to this state.
+  late final IndexRegistry registry;
+
   /// Constraint catalog. Rebuilt from the
   /// WAL on recovery via the `DeclareConstraint` / `DropConstraint`
   /// ops. Application code reads this to introspect active
@@ -95,6 +104,13 @@ class MutableGraphState {
   /// The engine is single-writer — a second `runTransaction` while
   /// [activeTxnId] is non-null throws.
   int? activeTxnId;
+
+  /// True once the active transaction has buffered a mutation. Reads
+  /// issued before the first write see the committed-as-of-begin
+  /// snapshot; once this flips true, a high-level read throws (a
+  /// buffer-only txn cannot offer read-your-writes). Reset at each txn
+  /// begin.
+  bool activeTxnHasWrites = false;
 
   /// Built-in logical-id index — `vid -> logicalId` and its reverse.
   /// Maintained on every AddNode / DelNode (so it rebuilds for free
@@ -121,7 +137,14 @@ class MutableGraphState {
         _nextLsn = nextLsn,
         _nextTxnId = nextTxnId,
         _baseCsrEidToSrc = _buildEidToSrc(csr),
-        _baseCsrEidToDst = _buildEidToDst(csr);
+        _baseCsrEidToDst = _buildEidToDst(csr) {
+    registry = IndexRegistry(
+      nodeProps: nodeProps,
+      edgeProps: edgeProps,
+      coordinator: () => indexRebuildCoordinator,
+      csrSizeBytes: () => _csr.sizeBytes,
+    );
+  }
 
   static Uint32List _buildEidToSrc(Csr csr) {
     // eids are sparse (deletions leave gaps), so size to max+1, not
@@ -377,6 +400,137 @@ class MutableGraphState {
 
   static final Uint32List _emptyU32 = Uint32List(0);
 
+  // ----- GraphReadView — read-only seam for sibling packages (GQL) -----
+  //
+  // These satisfy [GraphReadView]. Most are thin aliases over the
+  // overlay-aware reads above (clean interface names for the seam); the
+  // two scans below are the ones the GQL executor used to re-implement by
+  // poking `csr.labelIndex` / `overlay.*` directly (plan A3).
+
+  /// Every visible vid — base-CSR rows minus tombstones, then
+  /// overlay-added nodes minus tombstones. Order: base ascending, then
+  /// overlay-added in insertion order. (Was inlined in the GQL executor's
+  /// full `NodeScan`.)
+  @override
+  Iterable<Vid> scanNodes() sync* {
+    for (var v = 0; v < csr.nodeCount; v++) {
+      if (!overlay.deletedNodes.contains(v)) yield Vid(v);
+    }
+    for (final v in overlay.addedNodes.keys) {
+      if (!overlay.deletedNodes.contains(v)) yield Vid(v);
+    }
+  }
+
+  /// Effective AND-scan: every visible vid carrying **all** [labelIds].
+  /// Picks the smallest CSR label index as the intersection seed, then
+  /// folds in overlay-added nodes and label-overrides (three arms: base
+  /// seed scan / overlay-added / pre-existing rows that gained the set via
+  /// an override). Empty [labelIds] ⇒ [scanNodes]. (Was inlined in the GQL
+  /// executor's multi-label `NodeScan`.)
+  @override
+  Iterable<Vid> labelScanAll(List<int> labelIds) sync* {
+    if (labelIds.isEmpty) {
+      yield* scanNodes();
+      return;
+    }
+    var seedLabel = labelIds.first;
+    var seedSize = csr.labelIndex[seedLabel]?.length ?? 0;
+    for (var i = 1; i < labelIds.length; i++) {
+      final size = csr.labelIndex[labelIds[i]]?.length ?? 0;
+      if (size < seedSize) {
+        seedLabel = labelIds[i];
+        seedSize = size;
+      }
+    }
+    final yielded = <int>{};
+    final base = csr.labelIndex[seedLabel];
+    if (base != null) {
+      outer:
+      for (final v in base) {
+        if (overlay.deletedNodes.contains(v)) continue;
+        // When an override is present it defines the effective set
+        // entirely (it may have dropped [seedLabel]).
+        final override = overlay.labelOverride[v];
+        if (override != null) {
+          for (final l in labelIds) {
+            if (!override.contains(l)) continue outer;
+          }
+        } else {
+          for (final l in labelIds) {
+            if (l == seedLabel) continue; // already known
+            if (!csr.hasLabel(v, l)) continue outer;
+          }
+        }
+        yielded.add(v);
+        yield Vid(v);
+      }
+    }
+    // Overlay-added nodes whose set contains every required label.
+    outerAdded:
+    for (final entry in overlay.addedNodes.entries) {
+      final vid = entry.key;
+      if (overlay.deletedNodes.contains(vid)) continue;
+      if (yielded.contains(vid)) continue;
+      for (final l in labelIds) {
+        if (!entry.value.labelIds.contains(l)) continue outerAdded;
+      }
+      yielded.add(vid);
+      yield Vid(vid);
+    }
+    // Pre-existing CSR rows that gained the full set via an override.
+    outerOv:
+    for (final entry in overlay.labelOverride.entries) {
+      final vid = entry.key;
+      if (overlay.deletedNodes.contains(vid)) continue;
+      if (yielded.contains(vid)) continue;
+      for (final l in labelIds) {
+        if (!entry.value.contains(l)) continue outerOv;
+      }
+      yielded.add(vid);
+      yield Vid(vid);
+    }
+  }
+
+  @override
+  void forEachOutNeighbor(
+    Vid vid,
+    void Function(Vid dst, Eid eid, int edgeType) visit,
+  ) =>
+      forEachOutEdge(vid, (eid, dst, et) => visit(dst, eid, et));
+
+  @override
+  void forEachInNeighbor(
+    Vid vid,
+    void Function(Vid src, Eid eid, int edgeType) visit,
+  ) =>
+      forEachInEdge(vid, (eid, src, et) => visit(src, eid, et));
+
+  @override
+  Iterable<int> labelsOf(Vid vid) => effectiveLabelsOf(vid);
+
+  @override
+  bool hasLabel(Vid vid, int labelId) => hasLabelEffective(vid, labelId);
+
+  @override
+  PropValue? nodeProp(Vid vid, int keyId) =>
+      nodeProps.getBoxed(vid.value, keyId);
+
+  @override
+  PropValue? edgeProp(Eid eid, int keyId) =>
+      edgeProps.getBoxed(eid.value, keyId);
+
+  @override
+  int? labelId(String name) => strings.labelIdOf(name);
+
+  @override
+  int? edgeTypeId(String name) => strings.edgeTypeIdOf(name);
+
+  @override
+  int? propKeyId(String name) => strings.propKeyIdOf(name);
+
+  @override
+  String? labelName(int id) => strings.labelOf(id);
+
   // ----- Property reads — raw primitives -----------------------
 
   bool hasNodeProp(Vid vid, int keyId) =>
@@ -508,7 +662,7 @@ class MutableGraphState {
     // Pre-check unique constraints across the whole prop bundle so
     // partial writes aren't left behind on rejection.
     for (final e in props.entries) {
-      _enforceUniqueNodeIndex(vid.value, e.key, e.value);
+      registry.beforeNodeWrite(vid.value, e.key, e.value);
     }
     for (final e in props.entries) {
       _writeNodeProp(vid.value, e.key, e.value);
@@ -516,7 +670,7 @@ class MutableGraphState {
     // Indexes covering any written key need re-derivation.
     final touchedKeys = props.keys.toSet();
     for (final k in touchedKeys) {
-      _maintainNodeIndexes(vid.value, k);
+      registry.afterNodeWrite(vid.value, k);
     }
   }
 
@@ -548,7 +702,7 @@ class MutableGraphState {
     // A deleted vid disappears from every index that covered it —
     // rebuild every node index (incremental int indexes drop the
     // vid in O(1) without a full rebuild).
-    _maintainAllNodeIndexes(deletedVid: vid.value);
+    registry.onNodeDeleted(vid.value);
   }
 
   /// Applies a `SetNodeLabels` WAL op. Merges [added] into and removes
@@ -628,9 +782,9 @@ class MutableGraphState {
     if (!_nodeExists(vid.value)) {
       throw NotFoundException('SetNodeProp on absent vid ${vid.value}');
     }
-    _enforceUniqueNodeIndex(vid.value, keyId, value);
+    registry.beforeNodeWrite(vid.value, keyId, value);
     _writeNodeProp(vid.value, keyId, value);
-    _maintainNodeIndexes(vid.value, keyId);
+    registry.afterNodeWrite(vid.value, keyId);
   }
 
   /// Applies a `DelNodeProp` WAL op.
@@ -641,7 +795,7 @@ class MutableGraphState {
       hasLabel: (v, l) => hasLabelEffective(Vid(v), l),
     );
     nodeProps.remove(vid.value, keyId);
-    _maintainNodeIndexes(vid.value, keyId);
+    registry.afterNodeWrite(vid.value, keyId);
   }
 
   /// Applies an `AddEdge` WAL op. Fast-forwards [nextEid].
@@ -889,31 +1043,19 @@ class MutableGraphState {
   // deferred + incremental variants (and the worker-isolate rebuild
   // hand-off) sit alongside that baseline.
 
-  final Map<String, SecondaryIndex> _nodeIndexes = {};
-  final Map<String, SecondaryIndex> _edgeIndexes = {};
-
   /// Read-only view of the registered node-property indexes.
-  Map<String, SecondaryIndex> get nodeIndexes =>
-      Map.unmodifiable(_nodeIndexes);
+  Map<String, SecondaryIndex> get nodeIndexes => registry.nodeIndexes;
 
   /// Read-only view of the registered edge-property indexes.
-  Map<String, SecondaryIndex> get edgeIndexes =>
-      Map.unmodifiable(_edgeIndexes);
+  Map<String, SecondaryIndex> get edgeIndexes => registry.edgeIndexes;
 
   /// Builds a node-property index from the current [nodeProps] column.
-  ///
-  /// Fires [onSizeEvent] **once** if the freshly-built index size is at
-  /// or above [kIndexSizeWarnThreshold] of [csr.sizeBytes] (soft
-  /// budget). [onSizeEvent] is optional; pass `null` (default) to
-  /// silently build.
-  ///
-  /// Throws [ConstraintViolation] if an index named [IndexSpec.name]
-  /// already exists, or if the column type isn't yet declared.
+  /// Forwards to [registry] — see [IndexRegistry.createNodeIndex].
   SecondaryIndex createNodePropertyIndex(
     IndexSpec spec, {
     IndexSizeListener? onSizeEvent,
   }) =>
-      _createIndex(_nodeIndexes, nodeProps, spec, onSizeEvent);
+      registry.createNodeIndex(spec, onSizeEvent: onSizeEvent);
 
   /// Builds an edge-property index from the current [edgeProps] column.
   /// See [createNodePropertyIndex] for semantics.
@@ -921,269 +1063,31 @@ class MutableGraphState {
     IndexSpec spec, {
     IndexSizeListener? onSizeEvent,
   }) =>
-      _createIndex(_edgeIndexes, edgeProps, spec, onSizeEvent);
-
-  SecondaryIndex _createIndex(
-    Map<String, SecondaryIndex> registry,
-    PropertyStore store,
-    IndexSpec spec,
-    IndexSizeListener? onSizeEvent,
-  ) {
-    if (registry.containsKey(spec.name)) {
-      throw ConstraintViolation('index "${spec.name}" already exists');
-    }
-    // A declared valueType lets the index be built before any data
-    // exists: create the (empty) column of that type so the index has a
-    // concrete implementation to bind to and later writes are type-locked
-    // to it. `createColumn` is a no-op if the column already matches and
-    // throws if it conflicts — that's the type-mismatch guard.
-    if (spec.valueType != null) {
-      store.createColumn(spec.keyId, spec.valueType!);
-    }
-    final colType = store.columnType(spec.keyId);
-    if (colType == null) {
-      throw ConstraintViolation(
-          'cannot build index "${spec.name}": no column exists for keyId '
-          '${spec.keyId}. Write the property first, or set '
-          'IndexSpec(valueType: …) to index ahead of any writes.');
-    }
-
-    final SecondaryIndex idx;
-    switch (spec.kind) {
-      case EqualityRange(:final hashOverlay):
-        switch (colType) {
-          case ColumnType.int_:
-            idx = IntEqualityRangeIndex.build(
-              spec: spec,
-              store: store,
-              hashOverlay: hashOverlay,
-            );
-          case ColumnType.double_:
-            idx = DoubleEqualityRangeIndex.build(
-              spec: spec,
-              store: store,
-              hashOverlay: hashOverlay,
-            );
-          case ColumnType.stringId:
-            idx = StringIdEqualityRangeIndex.build(
-              spec: spec,
-              store: store,
-              hashOverlay: hashOverlay,
-            );
-          case ColumnType.string:
-            idx = StringEqualityRangeIndex.build(
-              spec: spec,
-              store: store,
-              hashOverlay: hashOverlay,
-            );
-          case ColumnType.bool_:
-            idx = BoolEqualityRangeIndex.build(
-              spec: spec,
-              store: store,
-            );
-        }
-    }
-
-    registry[spec.name] = idx;
-
-    if (onSizeEvent != null) {
-      final csrBytes = csr.sizeBytes;
-      final ratio = csrBytes == 0 ? 0.0 : idx.sizeBytes / csrBytes;
-      if (ratio >= kIndexSizeWarnThreshold) {
-        onSizeEvent(IndexSizeEvent(
-          spec: spec,
-          indexBytes: idx.sizeBytes,
-          csrBytes: csrBytes,
-          ratio: ratio,
-          severity: IndexSizeSeverity.warn,
-        ));
-      }
-    }
-    return idx;
-  }
+      registry.createEdgeIndex(spec, onSizeEvent: onSizeEvent);
 
   /// Looks up a registered node-property index by name.
-  SecondaryIndex? getNodeIndex(String name) => _nodeIndexes[name];
+  SecondaryIndex? getNodeIndex(String name) => registry.getNode(name);
 
   /// Looks up a registered edge-property index by name.
-  SecondaryIndex? getEdgeIndex(String name) => _edgeIndexes[name];
+  SecondaryIndex? getEdgeIndex(String name) => registry.getEdge(name);
 
   /// Removes a node-property index from the registry. Returns the
   /// removed index, or `null` if no such index existed.
-  SecondaryIndex? dropNodeIndex(String name) => _nodeIndexes.remove(name);
-
-  // mutation hooks
-  /// Throws [ConstraintViolation] if [value] is already present on a
-  /// different vid in any unique node-property index covering [keyId].
-  void _enforceUniqueNodeIndex(int vid, int keyId, PropValue value) {
-    for (final idx in _nodeIndexes.values) {
-      if (idx.spec.keyId != keyId || !idx.isUnique) continue;
-      final existing = _findVidInIndex(idx, value);
-      if (existing != null && existing != vid) {
-        throw ConstraintViolation(
-          'unique index "${idx.spec.name}" violated: '
-          'value already on vid $existing',
-        );
-      }
-    }
-  }
-
-  /// Names of indexes queued for a deferred rebuild — populated by
-  /// the mutation hook for any index whose spec has
-  /// `EqualityRange.deferred == true`. Drained by
-  /// [flushDeferredIndexUpdates].
-  final Set<String> _pendingNodeIndexFlush = {};
-
-  /// Updates every node index whose `keyId` matches [keyId]. Strategy
-  /// per-index:
-  /// - **incremental + non-unique**: O(1) `insert(vid, value)` /
-  ///   `removeVid(vid)` directly on the index (currently `int_`
-  ///   columns only — other typed columns fall back to rebuild).
-  /// - **deferred + non-unique**: queue the rebuild for the next
-  ///   `flushDeferredIndexUpdates()`.
-  /// - **otherwise (unique or default)**: drop-and-rebuild inline.
-  void _maintainNodeIndexes(int vid, int keyId) {
-    for (final name in _nodeIndexes.keys.toList()) {
-      final idx = _nodeIndexes[name]!;
-      if (idx.spec.keyId != keyId) continue;
-      final kind = idx.spec.kind;
-      if (kind is EqualityRange &&
-          kind.incremental &&
-          !kind.unique &&
-          _tryIncrementalNodeIndex(idx, vid, keyId)) {
-        continue;
-      }
-      if (kind is EqualityRange && kind.deferred && !kind.unique) {
-        _pendingNodeIndexFlush.add(name);
-      } else {
-        final spec = idx.spec;
-        _nodeIndexes.remove(name);
-        createNodePropertyIndex(spec);
-      }
-    }
-  }
-
-  /// Returns `true` if the index supports incremental mutation for
-  /// the column type at [keyId] AND the update was applied;
-  /// `false` to fall back to drop-and-rebuild.
-  bool _tryIncrementalNodeIndex(
-    SecondaryIndex idx,
-    int vid,
-    int keyId,
-  ) {
-    final colType = nodeProps.columnType(keyId);
-    if (idx is IntEqualityRangeIndex && colType == ColumnType.int_) {
-      if (nodeProps.has(vid, keyId)) {
-        idx.insert(vid, nodeProps.getInt(vid, keyId));
-      } else {
-        idx.removeVid(vid);
-      }
-      return true;
-    }
-    return false;
-  }
-
-  /// Drop-and-rebuild (or incrementally remove) every registered
-  /// node index — used on `applyDelNode` where the affected
-  /// [deletedVid] spans every column. Incremental int indexes drop
-  /// the vid in O(1) without a full rebuild.
-  void _maintainAllNodeIndexes({int? deletedVid}) {
-    final names = _nodeIndexes.keys.toList();
-    for (final name in names) {
-      final idx = _nodeIndexes[name];
-      if (idx == null) continue;
-      final spec = idx.spec;
-      final kind = spec.kind;
-      if (kind is EqualityRange &&
-          kind.incremental &&
-          !kind.unique &&
-          deletedVid != null &&
-          idx is IntEqualityRangeIndex) {
-        idx.removeVid(deletedVid);
-        continue;
-      }
-      if (kind is EqualityRange && kind.deferred && !kind.unique) {
-        _pendingNodeIndexFlush.add(spec.name);
-      } else {
-        _nodeIndexes.remove(spec.name);
-        createNodePropertyIndex(spec);
-      }
-    }
-  }
+  SecondaryIndex? dropNodeIndex(String name) => registry.dropNode(name);
 
   /// Number of deferred index rebuilds currently queued. Tests +
   /// observability use this; v1 doesn't expose a stream.
-  int get pendingDeferredIndexUpdates => _pendingNodeIndexFlush.length;
+  int get pendingDeferredIndexUpdates => registry.pendingDeferredIndexUpdates;
 
-  /// Async drain that uses [indexRebuildCoordinator] when set,
-  /// falling back to the synchronous main-isolate rebuild otherwise
-  ///. Worker-supported column types route
-  /// through `PersistentWorker.send(...)`; unsupported types fall
-  /// back per-index to the sync rebuild path so a mixed workload
-  /// keeps making progress.
-  Future<void> flushDeferredIndexUpdatesAsync() async {
-    if (_pendingNodeIndexFlush.isEmpty) return;
-    final coord = indexRebuildCoordinator;
-    if (coord == null) {
-      flushDeferredIndexUpdates();
-      return;
-    }
-    final pending = List<String>.of(_pendingNodeIndexFlush);
-    _pendingNodeIndexFlush.clear();
-    for (final name in pending) {
-      final idx = _nodeIndexes[name];
-      if (idx == null) continue;
-      final spec = idx.spec;
-      final kind = spec.kind;
-      if (idx is IntEqualityRangeIndex && kind is EqualityRange) {
-        // Snapshot the column on the main isolate, ship to worker.
-        final pairs = <(int, int)>[];
-        nodeProps.forEachSetInt(
-          spec.keyId,
-          (vid, value) => pairs.add((vid, value)),
-        );
-        final snap = snapshotIntColumn(pairs: pairs);
-        final rebuilt = await coord.rebuildInt(
-          IndexRebuildIntTask.copyAndWrap(
-            spec: spec,
-            hashOverlay: kind.hashOverlay,
-            values: snap.values,
-            vids: snap.vids,
-          ),
-        );
-        _nodeIndexes[name] = buildIntIndexFromSorted(
-          spec: spec,
-          sortedValues: rebuilt.sortedValues,
-          sortedVids: rebuilt.sortedVids,
-          hashOverlay: kind.hashOverlay,
-        );
-      } else {
-        // Worker doesn't yet support this column type — fall back to
-        // a sync main-isolate rebuild.
-        _nodeIndexes.remove(name);
-        createNodePropertyIndex(spec);
-      }
-    }
-  }
+  /// Async drain that uses [indexRebuildCoordinator] when set, falling
+  /// back to the synchronous main-isolate rebuild otherwise. Forwards to
+  /// [registry] — see [IndexRegistry.flushDeferredIndexUpdatesAsync].
+  Future<void> flushDeferredIndexUpdatesAsync() =>
+      registry.flushDeferredIndexUpdatesAsync();
 
-  /// Drains the deferred-update queue. Each
-  /// queued index is dropped + rebuilt from the current state.
-  /// Multiple pending updates per index coalesce — the rebuild runs
-  /// once. Synchronous on the main isolate — see
-  /// [flushDeferredIndexUpdatesAsync] for the worker-isolate variant
-  /// that offloads the rebuild when [indexRebuildCoordinator] is set.
-  void flushDeferredIndexUpdates() {
-    if (_pendingNodeIndexFlush.isEmpty) return;
-    final pending = List<String>.of(_pendingNodeIndexFlush);
-    _pendingNodeIndexFlush.clear();
-    for (final name in pending) {
-      final idx = _nodeIndexes[name];
-      if (idx == null) continue;
-      final spec = idx.spec;
-      _nodeIndexes.remove(name);
-      createNodePropertyIndex(spec);
-    }
-  }
+  /// Drains the deferred-update queue synchronously on the main isolate.
+  /// Forwards to [registry] — see [IndexRegistry.flushDeferredIndexUpdates].
+  void flushDeferredIndexUpdates() => registry.flushDeferredIndexUpdates();
 
   // ----- Constraint catalog mutation hooks -------------
 
@@ -1307,38 +1211,7 @@ class MutableGraphState {
         PropList() || PropMap() => v.toString(),
       };
 
-  /// Returns the first vid carrying [value] in [idx], or `null` if
-  /// the value isn't indexed. O(log n) for sorted-array indexes
-  /// (binary search); skips the hash overlay for simplicity.
-  int? _findVidInIndex(SecondaryIndex idx, PropValue value) {
-    if (idx is IntEqualityRangeIndex && value is PropInt) {
-      final lo = idx.lowerBound(value.value);
-      final hi = idx.upperBound(value.value);
-      return lo < hi ? idx.vidAt(lo) : null;
-    }
-    if (idx is DoubleEqualityRangeIndex && value is PropDouble) {
-      final lo = idx.lowerBound(value.value);
-      final hi = idx.upperBound(value.value);
-      return lo < hi ? idx.vidAt(lo) : null;
-    }
-    if (idx is StringIdEqualityRangeIndex && value is PropInt) {
-      final lo = idx.lowerBound(value.value);
-      final hi = idx.upperBound(value.value);
-      return lo < hi ? idx.vidAt(lo) : null;
-    }
-    if (idx is StringEqualityRangeIndex && value is PropString) {
-      final lo = idx.lowerBound(value.value);
-      final hi = idx.upperBound(value.value);
-      return lo < hi ? idx.vidAt(lo) : null;
-    }
-    if (idx is BoolEqualityRangeIndex && value is PropBool) {
-      final (lo, hi) = idx.equalRange(value.value);
-      return lo < hi ? idx.vidAt(lo) : null;
-    }
-    return null;
-  }
-
   /// Removes an edge-property index from the registry. Returns the
   /// removed index, or `null` if no such index existed.
-  SecondaryIndex? dropEdgeIndex(String name) => _edgeIndexes.remove(name);
+  SecondaryIndex? dropEdgeIndex(String name) => registry.dropEdge(name);
 }

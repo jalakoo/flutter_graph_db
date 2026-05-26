@@ -14,8 +14,8 @@ import 'expression_eval.dart';
 import 'result_row.dart';
 
 class GqlExecutor {
-  final GraphDb db;
-  GqlExecutor(this.db);
+  final GraphReadView view;
+  GqlExecutor(this.view);
 
   /// Streams every result row from [plan]. [params] is consulted by
   /// `$param` expressions during evaluation.
@@ -23,7 +23,7 @@ class GqlExecutor {
     LogicalPlan plan,
     Map<String, Object?> params,
   ) {
-    final eval = ExpressionEvaluator(db, params);
+    final eval = ExpressionEvaluator(view, params);
     return _run(plan, eval);
   }
 
@@ -116,14 +116,14 @@ class GqlExecutor {
           final neighbours = <int>[];
           if (op.direction == Direction.outgoing ||
               op.direction == Direction.undirected) {
-            db.state.forEachOutEdge(Vid(v), (eid, dst, et) {
+            view.forEachOutNeighbor(Vid(v), (dst, eid, et) {
               if (op.edgeTypeId != null && et != op.edgeTypeId) return;
               neighbours.add(dst.value);
             });
           }
           if (op.direction == Direction.incoming ||
               op.direction == Direction.undirected) {
-            db.state.forEachInEdge(Vid(v), (eid, src, et) {
+            view.forEachInNeighbor(Vid(v), (src, eid, et) {
               if (op.edgeTypeId != null && et != op.edgeTypeId) return;
               neighbours.add(src.value);
             });
@@ -148,83 +148,15 @@ class GqlExecutor {
   }
 
   Stream<ResultRow> _runScan(NodeScan scan) async* {
-    final state = db.state;
+    // The effective scan — full or multi-label AND, overlay-aware — now
+    // lives behind the read seam (`labelScanAll` treats an empty/absent
+    // label list as a full `scanNodes`). The executor just streams rows.
     final labelIds = scan.labelIds;
-    if (labelIds == null || labelIds.isEmpty) {
-      // Full scan — every visible node.
-      for (var v = 0; v < state.csr.nodeCount; v++) {
-        if (!state.overlay.deletedNodes.contains(v)) {
-          yield ResultRow({scan.alias: Vid(v)});
-        }
-      }
-      for (final v in state.overlay.addedNodes.keys) {
-        if (!state.overlay.deletedNodes.contains(v)) {
-          yield ResultRow({scan.alias: Vid(v)});
-        }
-      }
-      return;
-    }
-
-    // Multi-label AND scan. Pick the smallest CSR label index as the
-    // seed for the intersection, then filter the rest via
-    // `state.hasLabelEffective`. Also merge in overlay-added /
-    // label-override vids whose effective sets contain every label.
-    var seedLabel = labelIds.first;
-    var seedSize = state.csr.labelIndex[seedLabel]?.length ?? 0;
-    for (var i = 1; i < labelIds.length; i++) {
-      final size = state.csr.labelIndex[labelIds[i]]?.length ?? 0;
-      if (size < seedSize) {
-        seedLabel = labelIds[i];
-        seedSize = size;
-      }
-    }
-    final yielded = <int>{};
-    final base = state.csr.labelIndex[seedLabel];
-    if (base != null) {
-      outer:
-      for (final v in base) {
-        if (state.overlay.deletedNodes.contains(v)) continue;
-        // Honour overlay label-override — when present, defer to it
-        // entirely (it may have removed [seedLabel]).
-        final override = state.overlay.labelOverride[v];
-        if (override != null) {
-          for (final l in labelIds) {
-            if (!override.contains(l)) continue outer;
-          }
-        } else {
-          for (final l in labelIds) {
-            if (l == seedLabel) continue; // already known
-            if (!state.csr.hasLabel(v, l)) continue outer;
-          }
-        }
-        yielded.add(v);
-        yield ResultRow({scan.alias: Vid(v)});
-      }
-    }
-    // Overlay-added nodes whose set contains every required label.
-    outerAdded:
-    for (final entry in state.overlay.addedNodes.entries) {
-      final vid = entry.key;
-      if (state.overlay.deletedNodes.contains(vid)) continue;
-      if (yielded.contains(vid)) continue;
-      for (final l in labelIds) {
-        if (!entry.value.labelIds.contains(l)) continue outerAdded;
-      }
-      yielded.add(vid);
-      yield ResultRow({scan.alias: Vid(vid)});
-    }
-    // Pre-existing CSR vids that *gained* the full label set via a
-    // label-override (and weren't already yielded by the seed scan).
-    outerOv:
-    for (final entry in state.overlay.labelOverride.entries) {
-      final vid = entry.key;
-      if (state.overlay.deletedNodes.contains(vid)) continue;
-      if (yielded.contains(vid)) continue;
-      for (final l in labelIds) {
-        if (!entry.value.contains(l)) continue outerOv;
-      }
-      yielded.add(vid);
-      yield ResultRow({scan.alias: Vid(vid)});
+    final vids = (labelIds == null || labelIds.isEmpty)
+        ? view.scanNodes()
+        : view.labelScanAll(labelIds);
+    for (final v in vids) {
+      yield ResultRow({scan.alias: v});
     }
   }
 
@@ -244,13 +176,13 @@ class GqlExecutor {
       final from = fromBinding;
       if (expand.direction == Direction.outgoing ||
           expand.direction == Direction.undirected) {
-        db.state.forEachOutEdge(from, (eid, dst, et) {
+        view.forEachOutNeighbor(from, (dst, eid, et) {
           neighbours.add(_Neighbour(eid: eid, vid: dst, edgeType: et));
         });
       }
       if (expand.direction == Direction.incoming ||
           expand.direction == Direction.undirected) {
-        db.state.forEachInEdge(from, (eid, src, et) {
+        view.forEachInNeighbor(from, (src, eid, et) {
           neighbours.add(_Neighbour(eid: eid, vid: src, edgeType: et));
         });
       }

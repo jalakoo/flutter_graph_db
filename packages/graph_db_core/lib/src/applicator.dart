@@ -10,9 +10,12 @@ import 'wal_op.dart';
 /// it to [apply]. There is no other way to advance the
 /// [MutableGraphState].
 ///
-/// [recovery] is `true` during WAL replay and bulk import: `AddEdge`
-/// then writes the CSR directly instead of routing through the delta
-/// overlay (which would otherwise trip a merge mid-replay).
+/// [recovery] is `true` during WAL replay (and bulk import). It arms a
+/// tripwire: an `AddNode` / `AddEdge` for an entity the loaded snapshot
+/// already holds means the replay LSN gate (see `recoverInto`) failed to
+/// skip a snapshot-covered op, so `apply` throws [CorruptionDetected]
+/// instead of silently double-recording into the overlay. The gate is the
+/// primary guarantee; this is a loud backstop.
 ///
 /// The switch is exhaustive (no `default:` clause; the compiler fails
 /// on a new [WalOp] subclass) so adding a new [WalOp] subclass is a
@@ -40,6 +43,12 @@ void apply(
         :final labelIds,
         :final props,
       ):
+      if (recovery && state.vidOfLogicalId(logicalId) != null) {
+        throw CorruptionDetected(
+            'recovery replayed an AddNode the snapshot already holds '
+            '(logicalId "$logicalId", vid ${vid.value}) — the WAL replay '
+            'LSN gate failed to skip a snapshot-covered op');
+      }
       state.applyAddNode(
         vid,
         logicalId: logicalId,
@@ -67,6 +76,12 @@ void apply(
         :final typeId,
         :final props,
       ):
+      if (recovery && eid.value < state.csr.edgeCount) {
+        throw CorruptionDetected(
+            'recovery replayed an AddEdge the snapshot already holds '
+            '(eid ${eid.value}) — the WAL replay LSN gate failed to skip a '
+            'snapshot-covered op');
+      }
       state.applyAddEdge(
         eid,
         logicalId: logicalId,

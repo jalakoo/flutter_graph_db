@@ -53,7 +53,7 @@ class WriteBenchReport {
 }
 
 /// Builds an empty state seeded with [nodeCount] nodes (no edges).
-GraphDb _emptyDb(int nodeCount) {
+({GraphDb db, MutableGraphState state}) _emptyDb(int nodeCount) {
   final state = MutableGraphState.fromFixture(
     nodeCount: nodeCount,
     srcs: Uint32List(0),
@@ -65,7 +65,7 @@ GraphDb _emptyDb(int nodeCount) {
     vidSpace: nodeCount + 16,
     eidSpace: 16,
   );
-  return GraphDb.fromState(state);
+  return (db: GraphDb.fromState(state), state: state);
 }
 
 Future<WriteBenchReport> runWriteWorkloads({
@@ -78,7 +78,7 @@ Future<WriteBenchReport> runWriteWorkloads({
   final nodeCount = bulkEdgeCount; // 1 edge per node so endpoints exist
 
   // 1) Bulk insert
-  final bulkDb = _emptyDb(nodeCount);
+  final bulkDb = _emptyDb(nodeCount).db;
   final edges = [
     for (var i = 0; i < bulkEdgeCount; i++)
       BulkEdge(
@@ -94,7 +94,7 @@ Future<WriteBenchReport> runWriteWorkloads({
 
   // 2) Single-txn commit latency on a small graph (no WAL sink — pure
   // engine overhead). Each txn adds one edge.
-  final commitDb = _emptyDb(1024);
+  final commitDb = _emptyDb(1024).db;
   final commitLatencies = Float64List(commitSamples);
   for (var i = 0; i < commitSamples; i++) {
     final sw = Stopwatch()..start();
@@ -112,7 +112,7 @@ Future<WriteBenchReport> runWriteWorkloads({
     commitLatencies[i] = sw.elapsedMicroseconds.toDouble();
     // Avoid the merge threshold tripping during the bench by clearing
     // the overlay periodically.
-    if (i % 100 == 99) commitDb.state.mergeNow();
+    if (i % 100 == 99) commitDb.mergeNow();
   }
   commitLatencies.sort((a, b) => a.compareTo(b));
   final commitStats = LatencyStats(
@@ -131,10 +131,10 @@ Future<WriteBenchReport> runWriteWorkloads({
   // off-main.
   final mergeLatencies = Float64List(mergeSamples);
   for (var i = 0; i < mergeSamples; i++) {
-    final mergeDb = _emptyDb(2048);
+    final mergeState = _emptyDb(2048).state;
     for (var j = 0; j < 1024; j++) {
-      mergeDb.state.applyAddEdge(
-        mergeDb.state.allocEid(),
+      mergeState.applyAddEdge(
+        mergeState.allocEid(),
         logicalId: 'e$j',
         src: Vid(j),
         dst: Vid((j + 1) % 2048),
@@ -143,19 +143,19 @@ Future<WriteBenchReport> runWriteWorkloads({
       );
     }
     if (coord != null) {
-      mergeDb.state.mergeCoordinator = coord;
+      mergeState.mergeCoordinator = coord;
       // The "main-isolate stall" in the worker path is the copy +
       // install. We approximate by subtracting the worker compute
       // (reported by the worker) from the wall time of the await.
       final sw = Stopwatch()..start();
-      await mergeDb.state.maybeMergeOverlayAsync();
+      await mergeState.maybeMergeOverlayAsync();
       sw.stop();
       mergeLatencies[i] =
           (sw.elapsedMicroseconds - coord.lastMergeWorkerUs).toDouble();
       if (mergeLatencies[i] < 0) mergeLatencies[i] = 0;
     } else {
       final sw = Stopwatch()..start();
-      mergeDb.state.mergeNow();
+      mergeState.mergeNow();
       sw.stop();
       mergeLatencies[i] = sw.elapsedMicroseconds.toDouble();
     }

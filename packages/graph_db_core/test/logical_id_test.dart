@@ -3,22 +3,25 @@ import 'dart:typed_data';
 import 'package:graph_db_core/graph_db_core.dart';
 import 'package:test/test.dart';
 
-GraphDb _db() => GraphDb.fromState(MutableGraphState.fromFixture(
-      nodeCount: 0,
-      srcs: Uint32List(0),
-      dsts: Uint32List(0),
-      edgeTypes: Uint32List(0),
-      labelOf: Uint32List(0),
-      labelNames: const ['N'],
-      edgeTypeNames: const ['rel'],
-      vidSpace: 64,
-      eidSpace: 64,
-    ));
+({GraphDb db, MutableGraphState state}) _db() {
+  final state = MutableGraphState.fromFixture(
+    nodeCount: 0,
+    srcs: Uint32List(0),
+    dsts: Uint32List(0),
+    edgeTypes: Uint32List(0),
+    labelOf: Uint32List(0),
+    labelNames: const ['N'],
+    edgeTypeNames: const ['rel'],
+    vidSpace: 64,
+    eidSpace: 64,
+  );
+  return (db: GraphDb.fromState(state), state: state);
+}
 
 void main() {
   group('logical-id index', () {
     test('auto + explicit logicalId resolve both ways (RYW)', () async {
-      final db = _db();
+      final db = _db().db;
       final n = db.internLabel('N');
       final a = await db.runTransaction((txn) => txn.addNode(labelIds: [n]));
       final b = await db.runTransaction(
@@ -36,7 +39,7 @@ void main() {
     });
 
     test('a duplicate logicalId is rejected', () async {
-      final db = _db();
+      final db = _db().db;
       final n = db.internLabel('N');
       await db.runTransaction(
           (txn) => txn.addNode(labelIds: [n], logicalId: 'dup'));
@@ -48,7 +51,7 @@ void main() {
     });
 
     test('delete removes the node from the index', () async {
-      final db = _db();
+      final db = _db().db;
       final n = db.internLabel('N');
       final a = await db.runTransaction(
           (txn) => txn.addNode(labelIds: [n], logicalId: 'gone'));
@@ -60,13 +63,13 @@ void main() {
     });
 
     test('survives a snapshot encode/decode round-trip', () async {
-      final db = _db();
+      final (:db, :state) = _db();
       final n = db.internLabel('N');
       final a = await db.runTransaction(
           (txn) => txn.addNode(labelIds: [n], logicalId: 'ext-a'));
-      db.state.mergeNow(); // encodeSnapshot needs an empty overlay
+      state.mergeNow(); // encodeSnapshot needs an empty overlay
 
-      final restored = GraphDb.fromState(decodeSnapshot(encodeSnapshot(db.state).bytes));
+      final restored = GraphDb.fromState(decodeSnapshot(encodeSnapshot(state).bytes));
       expect(restored.nodeByLogicalId('ext-a')?.value, a.value);
       expect(restored.getNodeLogicalId(a), 'ext-a');
     });

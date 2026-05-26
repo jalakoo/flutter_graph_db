@@ -23,9 +23,9 @@ Future<GraphDb> _peopleDb() async {
   final names = ['Alice', 'Bob', 'Charlie', 'Dave', 'Eve'];
   final ages = [30, 25, 40, 28, 22];
   for (var i = 0; i < 5; i++) {
-    db.state.csr.labelOf[i] = personLabel;
-    db.state.nodeProps.setString(i, nameKey, names[i]);
-    db.state.nodeProps.setInt(i, ageKey, ages[i]);
+    state.csr.labelOf[i] = personLabel;
+    state.nodeProps.setString(i, nameKey, names[i]);
+    state.nodeProps.setInt(i, ageKey, ages[i]);
   }
   return db;
 }
@@ -97,6 +97,22 @@ void main() {
       expect(db.gqlPlanCache.length, 1);
       db.gqlPlanCache.invalidateAll();
       expect(db.gqlPlanCache.length, 0);
+    });
+
+    test('write plans cache too (A4.4); repeated CREATE re-executes', () async {
+      final db = await _peopleDb();
+      final cache = db.gqlPlanCache;
+      expect(cache.length, 0);
+      await db.executeQuery("CREATE (n:Person {name: 'Zoe'})");
+      expect(cache.length, 1); // the CreatePlan is cached
+      // Same query again → cache hit (still one entry) AND it re-executes
+      // (the cache stores the plan, not the result) → a second Zoe lands.
+      await db.executeQuery("CREATE (n:Person {name: 'Zoe'})");
+      expect(cache.length, 1);
+      final r = await db.executeQuery(
+        "MATCH (n:Person) WHERE n.name = 'Zoe' RETURN n.name",
+      );
+      expect(r.rows.length, 2);
     });
   });
 

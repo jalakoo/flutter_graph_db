@@ -144,7 +144,7 @@ void main() {
       {
         final db = await openWalBackedGraphDb(store: store);
         // The recovered state knows 'A'.
-        expect(db.state.strings.labelIdOf('A'), 0);
+        expect(db.labelId('A'), 0);
         await db.runTransaction((txn) {
           txn.addNode(labelIds: [0]);
         });

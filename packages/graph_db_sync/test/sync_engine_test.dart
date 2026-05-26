@@ -136,7 +136,7 @@ void main() {
       final hwmAfterFirst = target.hwm;
 
       // New writes.
-      final personLabel = s.db.state.strings.labelIdOf('Person')!;
+      final personLabel = s.db.labelId('Person')!;
       await s.db.runTransaction((txn) {
         txn.addNode(
           labelIds: [personLabel],
@@ -325,7 +325,7 @@ void main() {
         txn.setNodeLabels(const Vid(0),
             added: [employee], removed: const []);
       });
-      db.state.mergeNow();
+      db.mergeNow();
 
       final remote = FakeRemoteClient();
       final target = SyncTarget(
