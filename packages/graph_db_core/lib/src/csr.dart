@@ -67,6 +67,41 @@ class Csr {
   /// Label id -> sorted vids carrying that label.
   final Map<int, Uint32List> labelIndex;
 
+  // ----- Tombstones ---------------------------------------------------------
+
+  /// Length `nodeCount` when present; a `1` byte marks vid `v` as
+  /// deleted. `null` means "no node has ever been deleted in this CSR"
+  /// — the common case, kept null so a delete-free graph pays nothing.
+  ///
+  /// A tombstoned row stays addressable (vids are never reused, so a
+  /// previously-issued [Vid] must not silently rebind to a different
+  /// node) but is excluded from [labelIndex] and reports `false` from
+  /// [isTombstoned]'s inverse — see `MutableGraphState.isNodeVisible`.
+  ///
+  /// **This must survive a merge.** The overlay's `deletedNodes` set is
+  /// cleared when a fold installs a fresh CSR, so the fold folds the
+  /// overlay tombstones into this array; without it a deleted node
+  /// becomes visible again after the next merge.
+  final Uint8List? nodeTombstones;
+
+  // ----- eid -> endpoint maps -----------------------------------------------
+  //
+  // Built once inside [fromEdges], alongside the forward arrays it
+  // already walks. Previously `MutableGraphState` rebuilt these with
+  // three extra O(V+E) passes on every `installMergedCsr` — i.e. on the
+  // main isolate, immediately after the worker fold returned, which made
+  // "install is a pointer swap" untrue. Carrying them on the CSR means
+  // the worker computes them and install really is a pointer swap.
+
+  /// `eid -> source vid`, length `maxEid + 1` (eids are sparse — deletions
+  /// leave gaps — so this is sized by the largest surviving eid, not by
+  /// [edgeCount]). Entries for absent eids are `0`; callers must only
+  /// index eids known to be in this CSR.
+  final Uint32List eidToSrc;
+
+  /// `eid -> destination vid`. See [eidToSrc].
+  final Uint32List eidToDst;
+
   Csr({
     required this.nodeCount,
     required this.edgeCount,
@@ -82,7 +117,27 @@ class Csr {
     required this.labelRowPtr,
     required this.labels,
     required this.labelIndex,
+    required this.eidToSrc,
+    required this.eidToDst,
+    this.nodeTombstones,
   });
+
+  /// True iff [vid] is tombstoned (deleted). Allocation-free, O(1).
+  bool isTombstoned(int vid) {
+    final t = nodeTombstones;
+    return t != null && vid < t.length && t[vid] != 0;
+  }
+
+  /// Number of tombstoned rows. O(nodeCount) — diagnostics only.
+  int get tombstoneCount {
+    final t = nodeTombstones;
+    if (t == null) return 0;
+    var n = 0;
+    for (var i = 0; i < t.length; i++) {
+      if (t[i] != 0) n++;
+    }
+    return n;
+  }
 
   /// Builds a CSR from a flat edge list plus per-node labels.
   ///
@@ -156,6 +211,22 @@ class Csr {
       edgeIdOut[pos] = eids?[i] ?? i;
       edgeTypeOut[pos] = edgeTypes[i];
       cursorOut[s]++;
+    }
+
+    // ----- eid -> endpoint maps. One extra O(E) pass here replaces the
+    // three O(V+E) passes `installMergedCsr` used to run on the main
+    // isolate after every fold.
+    var maxEid = 0;
+    for (var i = 0; i < edgeCount; i++) {
+      final e = eids?[i] ?? i;
+      if (e > maxEid) maxEid = e;
+    }
+    final eidToSrc = Uint32List(edgeCount == 0 ? 0 : maxEid + 1);
+    final eidToDst = Uint32List(edgeCount == 0 ? 0 : maxEid + 1);
+    for (var i = 0; i < edgeCount; i++) {
+      final e = eids?[i] ?? i;
+      eidToSrc[e] = srcs[i];
+      eidToDst[e] = dsts[i];
     }
 
     // ----- reverse
@@ -245,6 +316,12 @@ class Csr {
       labelRowPtr: effLabelRowPtr,
       labels: effLabels,
       labelIndex: labelIndex,
+      eidToSrc: eidToSrc,
+      eidToDst: eidToDst,
+      // Retain the tombstone bitmap on the CSR. `Csr.fromEdges` used to
+      // consume it only to filter `labelIndex` and then drop it, which
+      // lost the delete on the next merge.
+      nodeTombstones: nodeTombstones,
     );
   }
 
@@ -283,7 +360,8 @@ class Csr {
   ///
   /// Counts `rowPtr` + `colIdx` + `edgeId` + `edgeType` (both directions)
   /// + ragged labels (`labelRowPtr` + `labels`) + the per-label
-  /// `labelIndex` arrays. Each `Uint32List` slot is 4 bytes. Used by
+  /// `labelIndex` arrays + the `eid -> endpoint` maps, at 4 bytes per
+  /// `Uint32List` slot, plus 1 byte per [nodeTombstones] entry. Used by
   /// the secondary-index registry to compute the 25-percent soft
   /// warning ratio. PR 1 keeps the legacy [labelOf] field in storage
   /// too; it shares slot count with [labels] under the single-label
@@ -295,16 +373,19 @@ class Csr {
       labelIndexSlots += arr.length;
     }
     return 4 *
-        (rowPtrOut.length +
-            colIdxOut.length +
-            edgeIdOut.length +
-            edgeTypeOut.length +
-            rowPtrIn.length +
-            colIdxIn.length +
-            edgeIdIn.length +
-            edgeTypeIn.length +
-            labelRowPtr.length +
-            labels.length +
-            labelIndexSlots);
+            (rowPtrOut.length +
+                colIdxOut.length +
+                edgeIdOut.length +
+                edgeTypeOut.length +
+                rowPtrIn.length +
+                colIdxIn.length +
+                edgeIdIn.length +
+                edgeTypeIn.length +
+                labelRowPtr.length +
+                labels.length +
+                labelIndexSlots +
+                eidToSrc.length +
+                eidToDst.length) +
+        (nodeTombstones?.length ?? 0);
   }
 }

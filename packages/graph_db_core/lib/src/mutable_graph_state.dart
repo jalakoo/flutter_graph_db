@@ -18,7 +18,7 @@ import 'secondary_index/index_spec.dart';
 import 'secondary_index/index_worker.dart';
 import 'secondary_index/secondary_index.dart';
 import 'string_interner.dart';
-import 'wal_op.dart' show ConstraintKind;
+import 'wal_op.dart' show ConstraintKind, PropertyOwner;
 
 /// The composed in-memory state the engine reads from.
 ///
@@ -43,16 +43,19 @@ class MutableGraphState implements GraphReadView {
   /// `state.csr` outside a transaction.
   Csr get csr => _csr;
 
-  /// Eid -> source vid (within the CSR base only). Rebuilt by
-  /// [installMergedCsr]. Used by [applyDelEdge] to resolve a
-  /// base-CSR edge's endpoints without a linear scan.
-  Uint32List _baseCsrEidToSrc;
-  Uint32List get baseCsrEidToSrc => _baseCsrEidToSrc;
+  /// Eid -> source vid (within the CSR base only). Used by
+  /// [applyDelEdge] to resolve a base-CSR edge's endpoints without a
+  /// linear scan.
+  ///
+  /// Built by [Csr.fromEdges] and carried on the CSR, so installing a
+  /// merged CSR re-binds this for free. It used to be rebuilt here with
+  /// three O(V+E) passes on every install — on the main isolate, right
+  /// after the worker fold returned.
+  Uint32List get baseCsrEidToSrc => _csr.eidToSrc;
 
-  /// Eid -> destination vid (within the CSR base only). Rebuilt by
-  /// [installMergedCsr].
-  Uint32List _baseCsrEidToDst;
-  Uint32List get baseCsrEidToDst => _baseCsrEidToDst;
+  /// Eid -> destination vid (within the CSR base only). See
+  /// [baseCsrEidToSrc].
+  Uint32List get baseCsrEidToDst => _csr.eidToDst;
 
   /// Soft merge trigger override. When `null`, the formula
   /// `max(10_000, 5 % of csr.edgeCount)` is used. Tests set a small
@@ -135,49 +138,16 @@ class MutableGraphState implements GraphReadView {
         _nextVid = nextVid ?? csr.nodeCount,
         _nextEid = nextEid ?? csr.edgeCount,
         _nextLsn = nextLsn,
-        _nextTxnId = nextTxnId,
-        _baseCsrEidToSrc = _buildEidToSrc(csr),
-        _baseCsrEidToDst = _buildEidToDst(csr) {
+        _nextTxnId = nextTxnId {
     registry = IndexRegistry(
       nodeProps: nodeProps,
       edgeProps: edgeProps,
       coordinator: () => indexRebuildCoordinator,
       csrSizeBytes: () => _csr.sizeBytes,
+      // Lets the registry scope unique enforcement to a constraint's
+      // label without holding a reference back to this state.
+      hasLabel: (vid, labelId) => hasLabelEffective(Vid(vid), labelId),
     );
-  }
-
-  static Uint32List _buildEidToSrc(Csr csr) {
-    // eids are sparse (deletions leave gaps), so size to max+1, not
-    // edgeCount — `out[eid]` must be a legal write for every eid
-    // present in `csr.edgeIdOut`.
-    final out = Uint32List(_maxEid(csr) + 1);
-    for (var v = 0; v < csr.nodeCount; v++) {
-      final end = csr.rowPtrOut[v + 1];
-      for (var i = csr.rowPtrOut[v]; i < end; i++) {
-        out[csr.edgeIdOut[i]] = v;
-      }
-    }
-    return out;
-  }
-
-  static Uint32List _buildEidToDst(Csr csr) {
-    final out = Uint32List(_maxEid(csr) + 1);
-    for (var v = 0; v < csr.nodeCount; v++) {
-      final end = csr.rowPtrOut[v + 1];
-      for (var i = csr.rowPtrOut[v]; i < end; i++) {
-        out[csr.edgeIdOut[i]] = csr.colIdxOut[i];
-      }
-    }
-    return out;
-  }
-
-  static int _maxEid(Csr csr) {
-    var maxEid = 0;
-    final eids = csr.edgeIdOut;
-    for (var i = 0; i < eids.length; i++) {
-      if (eids[i] > maxEid) maxEid = eids[i];
-    }
-    return maxEid;
   }
 
   /// Next vid the allocator will issue. Read-only; mutate via
@@ -277,11 +247,15 @@ class MutableGraphState implements GraphReadView {
 
   /// Replaces the current CSR with [newCsr] and clears the overlay.
   /// Called by [mergeNow]; exposed publicly so tests + the worker
-  /// follow-up can install a CSR built off-main.
+  /// path can install a CSR built off-main.
+  ///
+  /// **A genuine pointer swap.** The `eid -> endpoint` maps and the node
+  /// tombstones ride along on [newCsr] (built by the fold, in the worker
+  /// when one is wired), so nothing is recomputed here. Clearing the
+  /// overlay is safe only because the fold folded its tombstones into
+  /// `newCsr.nodeTombstones`.
   void installMergedCsr(Csr newCsr) {
     _csr = newCsr;
-    _baseCsrEidToSrc = _buildEidToSrc(newCsr);
-    _baseCsrEidToDst = _buildEidToDst(newCsr);
     overlay.clear();
   }
 
@@ -414,7 +388,7 @@ class MutableGraphState implements GraphReadView {
   @override
   Iterable<Vid> scanNodes() sync* {
     for (var v = 0; v < csr.nodeCount; v++) {
-      if (!overlay.deletedNodes.contains(v)) yield Vid(v);
+      if (_nodeExists(v)) yield Vid(v);
     }
     for (final v in overlay.addedNodes.keys) {
       if (!overlay.deletedNodes.contains(v)) yield Vid(v);
@@ -447,7 +421,7 @@ class MutableGraphState implements GraphReadView {
     if (base != null) {
       outer:
       for (final v in base) {
-        if (overlay.deletedNodes.contains(v)) continue;
+        if (!_nodeExists(v)) continue;
         // When an override is present it defines the effective set
         // entirely (it may have dropped [seedLabel]).
         final override = overlay.labelOverride[v];
@@ -619,7 +593,7 @@ class MutableGraphState implements GraphReadView {
     required List<int> labelIds,
     required Map<int, PropValue> props,
   }) {
-    if (overlay.deletedNodes.contains(vid.value)) {
+    if (isNodeTombstoned(vid.value)) {
       throw ConstraintViolation(
           'cannot AddNode at vid ${vid.value}: already tombstoned '
           '(vids are never reused)');
@@ -679,30 +653,39 @@ class MutableGraphState implements GraphReadView {
   /// deleted.
   void applyDelNode(Vid vid) {
     if (!_nodeExists(vid.value)) return; // idempotent
-    // Snapshot incident eids first so the iteration is stable while
-    // we mutate the overlay underneath.
-    final outEids = <int>[];
-    forEachOutEdge(vid, (e, _, __) => outEids.add(e.value));
-    final inEids = <int>[];
-    forEachInEdge(vid, (e, _, __) => inEids.add(e.value));
-    for (final e in outEids) {
-      applyDelEdge(Eid(e));
+    // One batch for the whole cascade. A high-degree node drops many
+    // edges, and each drop would otherwise rebuild every
+    // non-incremental edge index from scratch — O(degree · n) for what
+    // is really one rebuild per index.
+    registry.beginBatch();
+    try {
+      // Snapshot incident eids first so the iteration is stable while
+      // we mutate the overlay underneath.
+      final outEids = <int>[];
+      forEachOutEdge(vid, (e, _, __) => outEids.add(e.value));
+      final inEids = <int>[];
+      forEachInEdge(vid, (e, _, __) => inEids.add(e.value));
+      for (final e in outEids) {
+        applyDelEdge(Eid(e));
+      }
+      for (final e in inEids) {
+        applyDelEdge(Eid(e));
+      }
+      overlay.recordDelNode(vid.value);
+      // Drop the logical-id mapping so the vid stops resolving.
+      final lid = _logicalIdByVid.remove(vid.value);
+      if (lid != null) _vidByLogicalId.remove(lid);
+      // Properties of a deleted node are also gone — tombstone them
+      // in the columnar store so the index rebuild doesn't pick them
+      // up.
+      nodeProps.removeAllForVid(vid.value);
+      // A deleted vid disappears from every index that covered it —
+      // rebuild every node index (incremental int indexes drop the
+      // vid in O(1) without a full rebuild).
+      registry.onNodeDeleted(vid.value);
+    } finally {
+      registry.endBatch();
     }
-    for (final e in inEids) {
-      applyDelEdge(Eid(e));
-    }
-    overlay.recordDelNode(vid.value);
-    // Drop the logical-id mapping so the vid stops resolving.
-    final lid = _logicalIdByVid.remove(vid.value);
-    if (lid != null) _vidByLogicalId.remove(lid);
-    // Properties of a deleted node are also gone — tombstone them
-    // in the columnar store so the index rebuild doesn't pick them
-    // up.
-    nodeProps.removeAllForVid(vid.value);
-    // A deleted vid disappears from every index that covered it —
-    // rebuild every node index (incremental int indexes drop the
-    // vid in O(1) without a full rebuild).
-    registry.onNodeDeleted(vid.value);
   }
 
   /// Applies a `SetNodeLabels` WAL op. Merges [added] into and removes
@@ -765,6 +748,11 @@ class MutableGraphState implements GraphReadView {
         hasProp: (keyId) => nodeProps.has(vid.value, keyId),
       );
     }
+    // Unique-constraint re-check: a gained label can pull the node into a
+    // label-scoped unique constraint's scope for a value it already
+    // holds. Runs before the set is persisted so a violation leaves the
+    // node's labels untouched.
+    registry.beforeLabelGain(vid.value, addedSet);
     // Persist into the overlay. Overlay-added node = mutate
     // AddedNode.labelIds in place (sorted ascending); pre-existing CSR
     // node = labelOverride set.
@@ -789,6 +777,11 @@ class MutableGraphState implements GraphReadView {
 
   /// Applies a `DelNodeProp` WAL op.
   void applyDelNodeProp(Vid vid, int keyId) {
+    // Matches `applySetNodeProp` — a property op on a vid that does not
+    // exist is a caller error, not a silent no-op.
+    if (!_nodeExists(vid.value)) {
+      throw NotFoundException('DelNodeProp on absent vid ${vid.value}');
+    }
     constraints.enforceExistenceOnDelNodeProp(
       vid: vid.value,
       keyId: keyId,
@@ -833,8 +826,16 @@ class MutableGraphState implements GraphReadView {
       ),
       eid.value,
     );
+    // Same enforce -> write -> maintain sequence the node path uses.
+    // Pre-check the whole bundle so a rejection leaves no partial write.
+    for (final e in props.entries) {
+      registry.beforeEdgeWrite(eid.value, e.key, e.value);
+    }
     for (final e in props.entries) {
       _writeEdgeProp(eid.value, e.key, e.value);
+    }
+    for (final k in props.keys) {
+      registry.afterEdgeWrite(eid.value, k);
     }
   }
 
@@ -847,6 +848,7 @@ class MutableGraphState implements GraphReadView {
     final added = overlay.addedEdges[eid.value];
     if (added != null) {
       overlay.recordDelEdge(eid.value, src: added.src, dst: added.dst);
+      _dropEdgeProps(eid.value);
       return;
     }
     if (eid.value >= csr.edgeCount) {
@@ -855,16 +857,28 @@ class MutableGraphState implements GraphReadView {
     final src = baseCsrEidToSrc[eid.value];
     final dst = baseCsrEidToDst[eid.value];
     overlay.recordDelEdge(eid.value, src: src, dst: dst);
+    _dropEdgeProps(eid.value);
+  }
+
+  /// A removed edge's property values go with it — mirrors what
+  /// [applyDelNode] does for nodes. Without this the values lingered in
+  /// the column and any index rebuild picked the dead edge back up.
+  void _dropEdgeProps(int eid) {
+    edgeProps.removeAllForVid(eid);
+    registry.onEdgeDeleted(eid);
   }
 
   /// Applies a `SetEdgeProp` WAL op.
   void applySetEdgeProp(Eid eid, int keyId, PropValue value) {
+    registry.beforeEdgeWrite(eid.value, keyId, value);
     _writeEdgeProp(eid.value, keyId, value);
+    registry.afterEdgeWrite(eid.value, keyId);
   }
 
   /// Applies a `DelEdgeProp` WAL op.
   void applyDelEdgeProp(Eid eid, int keyId) {
     edgeProps.remove(eid.value, keyId);
+    registry.afterEdgeWrite(eid.value, keyId);
   }
 
   void _writeNodeProp(int vid, int keyId, PropValue value) =>
@@ -899,9 +913,22 @@ class MutableGraphState implements GraphReadView {
   /// CSR base or in the overlay's added-nodes map).
   bool isNodeVisible(Vid vid) => _nodeExists(vid.value);
 
+  /// True iff [v] has been deleted — in this overlay generation or in
+  /// any earlier one (folded into `csr.nodeTombstones`). Unlike
+  /// `!isNodeVisible`, this is `false` for a vid that was never
+  /// allocated.
+  bool isNodeTombstoned(int v) =>
+      overlay.deletedNodes.contains(v) ||
+      (v < _csr.nodeCount && _csr.isTombstoned(v));
+
+  /// Two tombstone sources, and both matter: the overlay set holds
+  /// deletes from the current generation, `csr.nodeTombstones` holds
+  /// everything folded in by an earlier merge. Consulting only the
+  /// overlay made a deleted node visible again after the next merge
+  /// (and after a snapshot round-trip).
   bool _nodeExists(int v) {
     if (overlay.deletedNodes.contains(v)) return false;
-    if (v < csr.nodeCount) return true;
+    if (v < _csr.nodeCount) return !_csr.isTombstoned(v);
     return overlay.addedNodes.containsKey(v);
   }
 
@@ -950,13 +977,13 @@ class MutableGraphState implements GraphReadView {
       for (var i = _csr.rowPtrOut[vid.value]; i < end; i++) {
         final eid = _csr.edgeIdOut[i];
         if (removed != null && removed.contains(eid)) continue;
-        if (overlay.deletedNodes.contains(_csr.colIdxOut[i])) continue;
+        if (!_nodeExists(_csr.colIdxOut[i])) continue;
         visit(Eid(eid), Vid(_csr.colIdxOut[i]), _csr.edgeTypeOut[i]);
       }
     }
     if (delta != null) {
       for (final e in delta.added) {
-        if (overlay.deletedNodes.contains(e.neighbor)) continue;
+        if (!_nodeExists(e.neighbor)) continue;
         visit(Eid(e.eid), Vid(e.neighbor), e.edgeType);
       }
     }
@@ -976,13 +1003,13 @@ class MutableGraphState implements GraphReadView {
       for (var i = _csr.rowPtrIn[vid.value]; i < end; i++) {
         final eid = _csr.edgeIdIn[i];
         if (removed != null && removed.contains(eid)) continue;
-        if (overlay.deletedNodes.contains(_csr.colIdxIn[i])) continue;
+        if (!_nodeExists(_csr.colIdxIn[i])) continue;
         visit(Eid(eid), Vid(_csr.colIdxIn[i]), _csr.edgeTypeIn[i]);
       }
     }
     if (delta != null) {
       for (final e in delta.added) {
-        if (overlay.deletedNodes.contains(e.neighbor)) continue;
+        if (!_nodeExists(e.neighbor)) continue;
         visit(Eid(e.eid), Vid(e.neighbor), e.edgeType);
       }
     }
@@ -994,9 +1021,17 @@ class MutableGraphState implements GraphReadView {
   /// retain their vid slot here as they do across a merge. Fast path
   /// returns `csr.nodeCount` when no nodes are pending.
   int get effectiveNodeCount {
-    if (overlay.addedNodes.isEmpty) return csr.nodeCount;
+    if (overlay.addedNodes.isEmpty && overlay.deletedNodes.isEmpty) {
+      return csr.nodeCount;
+    }
     var n = csr.nodeCount;
     for (final vid in overlay.addedNodes.keys) {
+      if (vid + 1 > n) n = vid + 1;
+    }
+    // Deleted vids keep their slot too — mirrors the same max formula in
+    // `foldOverlayIntoCsr`, which is what keeps this equal to the
+    // post-merge `csr.nodeCount`.
+    for (final vid in overlay.deletedNodes) {
       if (vid + 1 > n) n = vid + 1;
     }
     return n;
@@ -1114,10 +1149,13 @@ class MutableGraphState implements GraphReadView {
     constraints.declare(spec);
     // Auto-create an underlying unique index so per-mutation
     // enforcement comes for free via the unique-index path.
-    // v1 limitation: the index is global across all labels (doesn't
-    // honour [spec.labelId]) — a property uniqueness scoped to one
-    // label is enforced only at declare-time validation, not on
-    // post-declare mutations that touch other labels. Polish item.
+    //
+    // `labelScope` makes the enforcement Neo4j-shaped: the index still
+    // covers every row of the column, but a duplicate is only a
+    // violation when both the writer and the incumbent carry
+    // `spec.labelId`. Previously the index was global, so a node
+    // carrying an unrelated label was rejected for duplicating a value
+    // under someone else's constraint.
     if (spec is UniqueConstraint) {
       final indexName = '__uq_${spec.name}';
       // Skip if the column hasn't been declared yet — the constraint
@@ -1128,7 +1166,12 @@ class MutableGraphState implements GraphReadView {
         createNodePropertyIndex(IndexSpec(
           name: indexName,
           keyId: spec.keyId,
-          kind: const EqualityRange(unique: true, incremental: true),
+          // Not `incremental`: a unique index is always rebuilt so
+          // enforcement can trust the sorted arrays. The flag was inert
+          // here anyway (the incremental path skips unique indexes) and
+          // is now rejected outright by the registry.
+          kind: const EqualityRange(unique: true),
+          labelScope: spec.labelId,
         ));
       }
     }
@@ -1138,6 +1181,60 @@ class MutableGraphState implements GraphReadView {
   void applyDropConstraint(String name) {
     constraints.drop(name);
   }
+
+  // ----- Schema declaration hooks (journaled) -------------------------------
+  //
+  // Columns and indexes are declared through the WAL so the schema
+  // survives a restart. They used to be in-memory-only side effects,
+  // which meant every open had to re-run `declareNodeColumn` /
+  // `createNodePropertyIndex` or the column came back untyped and the
+  // index silently absent.
+
+  PropertyStore _storeFor(PropertyOwner owner) =>
+      owner == PropertyOwner.node ? nodeProps : edgeProps;
+
+  /// Applies a `DeclareColumn` op. Idempotent when the type matches;
+  /// throws [ConstraintViolation] on a conflicting re-declaration (the
+  /// type-lock guard).
+  void applyDeclareColumn(PropertyOwner owner, int keyId, ColumnType type) {
+    _storeFor(owner).createColumn(keyId, type);
+  }
+
+  /// Applies a `DeclareIndex` op, building the index from current data.
+  ///
+  /// Replay-safe: an index of that name already existing is treated as
+  /// satisfied rather than an error, because recovery may see the
+  /// declaration after a snapshot already rebuilt it.
+  void applyDeclareIndex(PropertyOwner owner, IndexSpec spec) {
+    final existing = owner == PropertyOwner.node
+        ? registry.getNode(spec.name)
+        : registry.getEdge(spec.name);
+    if (existing != null) return;
+    if (owner == PropertyOwner.node) {
+      registry.createNodeIndex(spec);
+    } else {
+      registry.createEdgeIndex(spec);
+    }
+  }
+
+  /// Applies a `DropIndex` op. Idempotent.
+  void applyDropIndex(PropertyOwner owner, String name) {
+    if (owner == PropertyOwner.node) {
+      registry.dropNode(name);
+    } else {
+      registry.dropEdge(name);
+    }
+  }
+
+  /// Every declared index, as the ops needed to recreate it. The snapshot
+  /// codec persists these so a snapshot-only open (no WAL tail) still
+  /// comes back with its indexes.
+  Iterable<({PropertyOwner owner, IndexSpec spec})> get declaredIndexes => [
+        for (final idx in registry.nodeIndexes.values)
+          (owner: PropertyOwner.node, spec: idx.spec),
+        for (final idx in registry.edgeIndexes.values)
+          (owner: PropertyOwner.edge, spec: idx.spec),
+      ];
 
   void _validateConstraintAgainstExistingData(ConstraintSpec spec) {
     if (spec is UniqueConstraint) {
@@ -1175,7 +1272,7 @@ class MutableGraphState implements GraphReadView {
     final base = _csr.labelIndex[labelId];
     if (base != null) {
       for (final v in base) {
-        if (overlay.deletedNodes.contains(v)) continue;
+        if (!_nodeExists(v)) continue;
         final ov = overlay.labelOverride[v];
         if (ov != null && !ov.contains(labelId)) continue;
         visit(v);

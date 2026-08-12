@@ -1,5 +1,7 @@
 import 'ids.dart';
 import 'prop_value.dart';
+import 'property_store.dart' show ColumnType;
+import 'secondary_index/index_spec.dart';
 import 'string_interner.dart';
 
 /// One operation in the write-ahead log.
@@ -160,6 +162,43 @@ final class DeclareConstraint extends WalOp {
 final class DropConstraint extends WalOp {
   final String name;
   const DropConstraint({required this.name});
+}
+
+/// Which store a schema op targets.
+enum PropertyOwner { node, edge }
+
+/// Declares a typed property column ahead of (or alongside) any write.
+///
+/// Journaled so the column's type-lock survives a restart. Column
+/// declarations used to be a purely in-memory side effect, which meant
+/// `declareNodeColumn` / `IndexSpec.valueType` had to be repeated on
+/// every open or the column silently came back untyped — and a typed
+/// read against it threw until the first write re-inferred the type.
+final class DeclareColumn extends WalOp {
+  final PropertyOwner owner;
+  final int keyId;
+  final ColumnType type;
+  const DeclareColumn({
+    required this.owner,
+    required this.keyId,
+    required this.type,
+  });
+}
+
+/// Declares a secondary index. Replay re-creates it from the recovered
+/// data — the index *contents* are derived, so only the declaration is
+/// journaled.
+final class DeclareIndex extends WalOp {
+  final PropertyOwner owner;
+  final IndexSpec spec;
+  const DeclareIndex({required this.owner, required this.spec});
+}
+
+/// Drops a previously declared index by name. Idempotent.
+final class DropIndex extends WalOp {
+  final PropertyOwner owner;
+  final String name;
+  const DropIndex({required this.owner, required this.name});
 }
 
 /// Interns a string id for a label / edge type / property key. Replayed

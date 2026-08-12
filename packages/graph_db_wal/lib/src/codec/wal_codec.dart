@@ -199,6 +199,28 @@ class WalCodec {
           'value': value,
           'kind': kind.name,
         },
+      DeclareColumn(:final owner, :final keyId, :final type) => {
+          'op': 'DeclareColumn',
+          'lsn': seq.lsn,
+          'txnId': seq.txnId,
+          'owner': owner.name,
+          'keyId': keyId,
+          'type': type.name,
+        },
+      DeclareIndex(:final owner, :final spec) => {
+          'op': 'DeclareIndex',
+          'lsn': seq.lsn,
+          'txnId': seq.txnId,
+          'owner': owner.name,
+          'spec': _indexSpecToCbor(spec),
+        },
+      DropIndex(:final owner, :final name) => {
+          'op': 'DropIndex',
+          'lsn': seq.lsn,
+          'txnId': seq.txnId,
+          'owner': owner.name,
+          'name': name,
+        },
     };
   }
 
@@ -267,6 +289,19 @@ class WalCodec {
           value: m['value'] as String,
           kind: _kindFromName(m['kind'] as String),
         ),
+      'DeclareColumn' => DeclareColumn(
+          owner: _ownerFromName(m['owner'] as String),
+          keyId: m['keyId'] as int,
+          type: _columnTypeFromName(m['type'] as String),
+        ),
+      'DeclareIndex' => DeclareIndex(
+          owner: _ownerFromName(m['owner'] as String),
+          spec: _indexSpecFromCbor(m['spec']),
+        ),
+      'DropIndex' => DropIndex(
+          owner: _ownerFromName(m['owner'] as String),
+          name: m['name'] as String,
+        ),
       _ => throw FormatException('unknown WalOp tag: $tag'),
     };
     return SequencedWalOp(lsn: lsn, txnId: txnId, op: op);
@@ -319,6 +354,83 @@ class WalCodec {
         'propKey' => StringKind.propKey,
         _ => throw FormatException('unknown StringKind: $name'),
       };
+
+  // -------------------------------------------------------- schema ops ↔ CBOR
+
+  PropertyOwner _ownerFromName(String name) => switch (name) {
+        'node' => PropertyOwner.node,
+        'edge' => PropertyOwner.edge,
+        _ => throw FormatException('unknown PropertyOwner: $name'),
+      };
+
+  ColumnType _columnTypeFromName(String name) => ColumnType.values.firstWhere(
+        (t) => t.name == name,
+        orElse: () => throw FormatException('unknown ColumnType: $name'),
+      );
+
+  /// `IndexSpec` on the wire. Only [EqualityRange] exists today; the
+  /// `kind` tag is written explicitly so a future kind decodes as an
+  /// error rather than silently as an equality index.
+  Map<String, dynamic> _indexSpecToCbor(IndexSpec spec) {
+    final kind = spec.kind;
+    return {
+      'name': spec.name,
+      'keyId': spec.keyId,
+      'priority': spec.priority.name,
+      if (spec.valueType != null) 'valueType': spec.valueType!.name,
+      if (spec.labelScope != null) 'labelScope': spec.labelScope,
+      'kind': switch (kind) {
+        EqualityRange(
+          :final hashOverlay,
+          :final unique,
+          :final deferred,
+          :final incremental,
+        ) =>
+          {
+            'k': 'EqualityRange',
+            'hashOverlay': hashOverlay,
+            'unique': unique,
+            'deferred': deferred,
+            'incremental': incremental,
+          },
+      },
+    };
+  }
+
+  IndexSpec _indexSpecFromCbor(dynamic c) {
+    if (c is! Map) {
+      throw const FormatException('IndexSpec must be a CBOR map');
+    }
+    final rawKind = c['kind'];
+    if (rawKind is! Map) {
+      throw const FormatException('IndexSpec.kind must be a CBOR map');
+    }
+    final kindTag = rawKind['k'];
+    final IndexKind kind = switch (kindTag) {
+      'EqualityRange' => EqualityRange(
+          hashOverlay: rawKind['hashOverlay'] as bool,
+          unique: rawKind['unique'] as bool,
+          deferred: rawKind['deferred'] as bool,
+          incremental: rawKind['incremental'] as bool,
+        ),
+      _ => throw FormatException('unknown IndexKind tag: $kindTag'),
+    };
+    final rawValueType = c['valueType'];
+    final rawPriority = c['priority'];
+    return IndexSpec(
+      name: c['name'] as String,
+      keyId: c['keyId'] as int,
+      kind: kind,
+      priority: IndexPriority.values.firstWhere(
+        (p) => p.name == rawPriority,
+        orElse: () => IndexPriority.low,
+      ),
+      valueType: rawValueType == null
+          ? null
+          : _columnTypeFromName(rawValueType as String),
+      labelScope: c['labelScope'] as int?,
+    );
+  }
 }
 
 // ============================================================ varint + u64

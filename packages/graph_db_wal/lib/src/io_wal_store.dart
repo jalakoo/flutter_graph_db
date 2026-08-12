@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -9,17 +10,48 @@ import 'wal_store.dart';
 /// The default on iOS / Android / desktop.
 ///
 /// **Single-file mode.** All bytes live in one file at the given path.
-/// [truncate] is implemented via tail-rewrite (read the kept tail
-/// into memory, overwrite from byte 0, truncate the file to the new
-/// length). This works for typical WAL sizes (<100 MB) but rewrites
-/// the whole file on each compact; the rotated 16 MB segment layout
-/// is the proper polish — O(1) truncate via segment-file delete —
-/// tracked as a carry-forward.
+/// [truncate] copies the retained tail to a sibling temp file, fsyncs it,
+/// and renames it over the WAL — so the rewrite is atomic and streams in
+/// bounded chunks. It still rewrites the retained bytes on each compact;
+/// the rotated 16 MB segment layout is the proper fix (O(1) truncate via
+/// segment-file delete) and stays a carry-forward.
 class IoWalStore implements WalStore {
   final File _file;
   RandomAccessFile? _raf;
   int _length;
+
+  /// Set inside the queued [close] body — this is what [_ensureOpen]
+  /// reads, so queue position decides whether an operation was in time.
   bool _closed = false;
+
+  /// Set synchronously by [close] purely for idempotence.
+  bool _closeRequested = false;
+
+  /// Chunk size for the streaming tail copy in [truncate] and for
+  /// [read]. Bounds truncate's peak memory regardless of WAL size.
+  static const int _chunkSize = 64 * 1024;
+
+  /// Suffix for the temp file [truncate] builds before renaming it over
+  /// the WAL. A leftover of this name means a crash mid-truncate; it is
+  /// stale by definition and removed on the next [truncate].
+  static const String _compactSuffix = '.compact';
+
+  /// Tail of the handle-mutation queue. [append], [sync], [truncate] and
+  /// [close] all run through [_serialize], because [truncate] has to
+  /// close and reopen `_raf` around its rename: without the queue, a
+  /// group-commit `sync()` landing in that window sees a null handle and
+  /// throws "WalStore is closed" while the store is perfectly healthy.
+  ///
+  /// Never completes with an error — [_serialize] completes the gate in a
+  /// `whenComplete`, so one failed operation cannot poison the queue.
+  Future<void> _queue = Future<void>.value();
+
+  Future<T> _serialize<T>(Future<T> Function() op) {
+    final previous = _queue;
+    final gate = Completer<void>();
+    _queue = gate.future;
+    return previous.then((_) => op()).whenComplete(gate.complete);
+  }
 
   IoWalStore._(this._file, this._raf, this._length);
 
@@ -36,7 +68,10 @@ class IoWalStore implements WalStore {
   Future<void> append(
     Uint8List bytes, {
     required Durability durability,
-  }) async {
+  }) =>
+      _serialize(() => _appendLocked(bytes, durability));
+
+  Future<void> _appendLocked(Uint8List bytes, Durability durability) async {
     _ensureOpen();
     await _raf!.writeFrom(bytes);
     _length += bytes.length;
@@ -57,7 +92,7 @@ class IoWalStore implements WalStore {
     final reader = await _file.open();
     try {
       await reader.setPosition(fromOffset);
-      const chunkSize = 64 * 1024;
+      const chunkSize = _chunkSize;
       while (true) {
         final chunk = await reader.read(chunkSize);
         if (chunk.isEmpty) break;
@@ -71,64 +106,114 @@ class IoWalStore implements WalStore {
   @override
   int get length => _length;
 
+  /// Drops everything before [upToOffset], keeping the tail.
+  ///
+  /// **Crash-safe.** The retained tail is streamed into a sibling temp
+  /// file, fsynced, and then renamed over the WAL — rename is atomic, so
+  /// a crash at any point leaves either the old complete WAL or the new
+  /// complete one. Nothing in between is observable.
+  ///
+  /// This replaced a destructive in-place rewrite that reopened the WAL
+  /// with `FileMode.write` (truncating it to zero) before writing the
+  /// tail back. A crash inside that window lost the entire tail — i.e.
+  /// every commit acknowledged after the snapshot was captured, which is
+  /// exactly the data the snapshot does *not* cover.
+  ///
+  /// Peak memory is one [_chunkSize] buffer, not the whole tail.
   @override
-  Future<int> truncate({required int upToOffset}) async {
+  Future<int> truncate({required int upToOffset}) =>
+      _serialize(() => _truncateLocked(upToOffset));
+
+  Future<int> _truncateLocked(int upToOffset) async {
     _ensureOpen();
     if (upToOffset <= 0) return 0;
     if (upToOffset >= _length) {
-      // Truncating the entire file — fast path: zero it.
-      await _raf!.setPosition(0);
+      // Dropping everything. `truncate(0)` on the live handle is already
+      // atomic — there is no tail to stage.
       await _raf!.truncate(0);
       await _raf!.flush();
+      await _raf!.setPosition(0);
       _length = 0;
       return upToOffset;
     }
-    // Tail-rewrite: read [upToOffset..length) into memory, overwrite
-    // from byte 0, truncate to the new length. The whole-file rewrite
-    // cost is the trade-off for staying in single-file mode; the
-    // rotated-segment design gets to O(1) per compact.
+
     final tailLength = _length - upToOffset;
+    final tmp = File('${_file.path}$_compactSuffix');
+    // A leftover temp file is stale by definition — it belongs to a
+    // truncate that never reached its rename.
+    if (tmp.existsSync()) await tmp.delete();
+
     final reader = await _file.open();
-    Uint8List tail;
+    final writer = await tmp.open(mode: FileMode.write);
     try {
       await reader.setPosition(upToOffset);
-      tail = await reader.read(tailLength);
+      var remaining = tailLength;
+      while (remaining > 0) {
+        final want = remaining < _chunkSize ? remaining : _chunkSize;
+        final chunk = await reader.read(want);
+        if (chunk.isEmpty) break; // file shrank underneath us
+        await writer.writeFrom(chunk);
+        remaining -= chunk.length;
+      }
+      // Durable before the rename: the rename must never publish a temp
+      // file whose bytes are still in the page cache.
+      await writer.flush();
     } finally {
       await reader.close();
+      await writer.close();
     }
-    // The append handle is `FileMode.append` which appends regardless
-    // of `setPosition`. Reopen in write mode for the rewrite, then
-    // restore the append handle so subsequent appends work normally.
+
+    // Release our handle before the rename — Windows refuses to replace
+    // a file that still has an open handle. Nothing else can observe the
+    // null handle: append / sync / close all queue behind this call.
+    await _raf!.flush();
     await _raf!.close();
-    final rewrite = await _file.open(mode: FileMode.write);
+    _raf = null;
     try {
-      await rewrite.writeFrom(tail);
-      await rewrite.truncate(tailLength);
-      await rewrite.flush();
+      try {
+        await tmp.rename(_file.path);
+      } on FileSystemException {
+        // Windows can refuse rename-over-existing. Delete then rename;
+        // the snapshot still covers everything dropped here, so a crash
+        // in this narrow window is recoverable from the snapshot alone.
+        await _file.delete();
+        await tmp.rename(_file.path);
+      }
+      _length = tailLength;
     } finally {
-      await rewrite.close();
+      // Always restore a usable handle, even if the rename failed —
+      // otherwise every later operation reports the store as closed and
+      // buries the real error.
+      _raf = await _file.open(mode: FileMode.append);
+      _length = await _raf!.length();
     }
-    _raf = await _file.open(mode: FileMode.append);
-    _length = tailLength;
     return upToOffset;
   }
 
   @override
-  Future<void> sync() async {
-    _ensureOpen();
-    await _raf!.flush();
-  }
+  Future<void> sync() => _serialize(() async {
+        _ensureOpen();
+        await _raf!.flush();
+      });
 
   @override
-  Future<void> close() async {
-    if (_closed) return;
-    _closed = true;
-    final raf = _raf;
-    _raf = null;
-    if (raf != null) {
-      await raf.flush();
-      await raf.close();
-    }
+  Future<void> close() {
+    // `_closeRequested` flips synchronously so a second close is a no-op.
+    // `_closed` — the flag `_ensureOpen` reads — is set inside the queued
+    // body instead, so operations already queued ahead of this close
+    // still run. Setting it synchronously would reject a truncate that
+    // was requested first and merely hadn't started yet.
+    if (_closeRequested) return Future<void>.value();
+    _closeRequested = true;
+    return _serialize(() async {
+      _closed = true;
+      final raf = _raf;
+      _raf = null;
+      if (raf != null) {
+        await raf.flush();
+        await raf.close();
+      }
+    });
   }
 
   void _ensureOpen() {

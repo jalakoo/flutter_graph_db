@@ -3,10 +3,11 @@
 Engine improvements requested by a downstream consumer, triaged and
 verified against the code on 2026-05-24, then implemented the same day.
 
-**Status: shipped.** All seven items landed (with one sub-item of #5
-deferred — see below). New tests: graph_db_core 224 → green,
-graph_db_wal 76 → green, graph_db_gql 95 → green. No commits yet (per
-the defer-commits convention).
+**Status: shipped and committed.** All seven items landed (with one
+sub-item of #5 deferred — see below). Test counts at the time:
+graph_db_core 224, graph_db_wal 76, graph_db_gql 95 — all green. See
+`plans/2026_08_21_updates.md` for the follow-up review that found (and
+fixed) the tombstone, edge-index, and WAL-truncate defects in this code.
 
 ---
 

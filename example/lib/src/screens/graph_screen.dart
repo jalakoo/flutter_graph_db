@@ -148,7 +148,7 @@ class _NodeWidget extends StatelessWidget {
       return _NodeButton(
         onTap: () {
           Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => PersonDetailScreen(vid: vid)),
+            MaterialPageRoute<void>(builder: (_) => PersonDetailScreen(vid: vid)),
           );
         },
         child: Tooltip(
@@ -168,7 +168,7 @@ class _NodeWidget extends StatelessWidget {
     return _NodeButton(
       onTap: () {
         Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => CompanyDetailScreen(vid: vid)),
+          MaterialPageRoute<void>(builder: (_) => CompanyDetailScreen(vid: vid)),
         );
       },
       child: Container(

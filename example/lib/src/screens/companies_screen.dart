@@ -76,7 +76,7 @@ class _CompanyCard extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 6),
       child: InkWell(
         onTap: () => Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => CompanyDetailScreen(vid: vid)),
+          MaterialPageRoute<void>(builder: (_) => CompanyDetailScreen(vid: vid)),
         ),
         child: Padding(
           padding: const EdgeInsets.all(16),

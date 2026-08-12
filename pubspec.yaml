@@ -1,16 +1,35 @@
-# Repo-root pubspec. Exists so the shared `analysis_options.yaml` at
-# this level can resolve `package:lints/recommended.yaml` when
-# `dart analyze` or `flutter analyze` is run at the repo root.
+# Repo-root pubspec. Two jobs:
+#
+#  1. Declares the **pub workspace** (Dart 3.6+). One `dart pub get` here
+#     resolves every member, and the whole repo shares a single
+#     `pubspec.lock` — no more running `pub get` in ten directories and
+#     drifting between ten lockfiles.
+#  2. Lets the shared `analysis_options.yaml` at this level resolve
+#     `package:lints/recommended.yaml` when `dart analyze` runs at the
+#     repo root.
 #
 # This is NOT a published package — the real packages live under
-# `packages/` and `example/` and each has its own pubspec.
+# `packages/` and `example/`, each with its own pubspec.
 name: flutter_graph_db_workspace
-description: Repo-root resolution shim for shared lints. Not published.
+description: Workspace root for flutter_graph_db. Not published.
 publish_to: none
 version: 0.0.0
 
 environment:
-  sdk: ^3.5.0
+  # 3.6 is the floor for `resolution: workspace`.
+  sdk: ^3.6.0
+
+workspace:
+  - example
+  - packages/flutter_graph_db
+  - packages/graph_db_bench
+  - packages/graph_db_core
+  - packages/graph_db_gql
+  - packages/graph_db_remote
+  - packages/graph_db_remote_falkor
+  - packages/graph_db_remote_neo4j
+  - packages/graph_db_sync
+  - packages/graph_db_wal
 
 dev_dependencies:
-  lints: ^4.0.0
+  lints: ^6.0.0

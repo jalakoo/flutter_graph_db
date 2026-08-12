@@ -42,7 +42,9 @@ for (final r in reports) {
 
 - **Per-target HWM** — each `SyncTarget` tracks the LSN it's last
   shipped past. `syncOnce` walks the WAL from `target.hwm + 1`
-  forward.
+  forward. Pass a `SyncStateStore` to make it durable (see below);
+  without one the HWM is in-memory and a restart re-ships the whole
+  retained WAL.
 - **Quarantine on rejection** — if a target's `bulkImport` throws a
   `RemoteException`, the batch lands in `target.quarantine` (with the
   reason + timestamp) and the HWM stays put. Later runs retry from
@@ -77,11 +79,35 @@ for projects whose schema invariant is "every node must have a label"
 and you want data-quality issues to surface at the boundary instead
 of being papered over.
 
+## Durable progress
+
+Give the engine a `SyncStateStore` and call `restore()` once at startup.
+Each target's HWM is then persisted as soon as the remote acknowledges a
+batch, so a restart resumes instead of re-shipping the retained WAL:
+
+```dart
+import 'package:graph_db_sync/io_sync_state_store.dart'; // native only
+
+final stateStore = await IoSyncStateStore.open('${dir.path}/sync.json');
+final engine = SyncEngine(
+  db: db,
+  walStore: store,
+  targets: [...],
+  stateStore: stateStore,
+);
+await engine.restore();   // reload HWMs before the first syncOnce
+```
+
+`InMemorySyncStateStore` is the platform-neutral adapter for tests. A
+target with no persisted entry keeps its defaults, so adding a target to
+an existing deployment seeds it normally.
+
+Writes are atomic (temp file + rename), so a crash leaves the previous
+complete state rather than a half-written file that would lose every
+target's progress at once.
+
 ## Carry-forwards
 
-- HWM persistence (snapshotted alongside the engine's snapshot meta)
-  — today the HWM is in-memory per `SyncTarget`. Persistence is a
-  drop-in.
 - HLC + LWW conflict resolution — depends on the adapter surfacing
   richer conflict-detection metadata than the current single
   `RemoteConstraintViolation`.

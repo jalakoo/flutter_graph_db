@@ -24,20 +24,34 @@ import '../overlay/delta_overlay.dart';
 /// 2. Build `newLabelOf` by extending base.labelOf with overlay
 ///    additions + applying any label override.
 /// 3. Walk the base CSR edge-by-edge, skipping anything in
-///    `overlay.deletedEdges` and anything incident on
-///    `overlay.deletedNodes`.
+///    `overlay.deletedEdges` and anything incident on a dead node
+///    (`overlay.deletedNodes` ∪ `base.nodeTombstones`).
 /// 4. Append `overlay.addedEdges` (also filtered against
 ///    `deletedNodes` for nodes deleted in the same generation).
-/// 5. Hand the resulting srcs/dsts/edgeTypes/eids to
+/// 5. Union the base tombstones with this generation's `deletedNodes`
+///    and carry the result onto the fresh CSR — the overlay set is
+///    cleared on install, so this array is where a delete lives from
+///    here on.
+/// 6. Hand the resulting srcs/dsts/edgeTypes/eids to
 ///    `Csr.fromEdges` (handles the row-pointer build + the parallel
-///    reverse CSR + the label index).
+///    reverse CSR + the label index + the `eid -> endpoint` maps).
 Csr foldOverlayIntoCsr({
   required Csr base,
   required DeltaOverlay overlay,
 }) {
   // ----- 1. New node count --------------------------------------------------
+  //
+  // Covers deleted vids as well as added ones. A node added *and* deleted
+  // before the first merge is absent from `addedNodes` (the delete pulls
+  // it back out), so counting only added vids left the row outside
+  // `nodeCount` — and a tombstone outside `nodeCount` has nowhere to
+  // live, which let the vid be allocated a second time. Keep the row so
+  // "vids are never reused" holds.
   var newNodeCount = base.nodeCount;
   for (final vid in overlay.addedNodes.keys) {
+    if (vid + 1 > newNodeCount) newNodeCount = vid + 1;
+  }
+  for (final vid in overlay.deletedNodes) {
     if (vid + 1 > newNodeCount) newNodeCount = vid + 1;
   }
 
@@ -94,11 +108,27 @@ Csr foldOverlayIntoCsr({
     if (start < end) newLabelOf[v] = newLabels[start];
   }
 
-  // Node-tombstone bitmap fed to Csr.fromEdges so the label index
-  // excludes deleted nodes.
+  // Node-tombstone bitmap. Carried on the resulting CSR (not just used
+  // to filter the label index) so the delete survives this fold — the
+  // overlay's `deletedNodes` set is cleared by `installMergedCsr`, and
+  // before this was retained a deleted node became visible again after
+  // the next merge.
+  //
+  // **Union of both sources:** tombstones already on the base CSR plus
+  // the ones this overlay generation adds. Dropping the base half would
+  // resurrect every node deleted before the previous fold.
+  final baseTombstones = base.nodeTombstones;
   Uint8List? nodeTombstones;
-  if (overlay.deletedNodes.isNotEmpty) {
+  if (overlay.deletedNodes.isNotEmpty || baseTombstones != null) {
     nodeTombstones = Uint8List(newNodeCount);
+    if (baseTombstones != null) {
+      final n = baseTombstones.length < newNodeCount
+          ? baseTombstones.length
+          : newNodeCount;
+      for (var v = 0; v < n; v++) {
+        nodeTombstones[v] = baseTombstones[v];
+      }
+    }
     for (final v in overlay.deletedNodes) {
       if (v < newNodeCount) nodeTombstones[v] = 1;
     }
@@ -115,14 +145,19 @@ Csr foldOverlayIntoCsr({
 
   final deletedEdges = overlay.deletedEdges;
   final deletedNodes = overlay.deletedNodes;
+  // Dead in the *result*: tombstoned on the base CSR or deleted by this
+  // overlay generation. Checking both means an edge incident on a node
+  // deleted in an earlier generation can never be carried forward, even
+  // when the base was built by a fixture loader rather than a fold.
+  bool dead(int vid) => deletedNodes.contains(vid) || base.isTombstoned(vid);
   for (var v = 0; v < base.nodeCount; v++) {
-    if (deletedNodes.contains(v)) continue;
+    if (dead(v)) continue;
     final end = base.rowPtrOut[v + 1];
     for (var i = base.rowPtrOut[v]; i < end; i++) {
       final eid = base.edgeIdOut[i];
       if (deletedEdges.contains(eid)) continue;
       final dst = base.colIdxOut[i];
-      if (deletedNodes.contains(dst)) continue;
+      if (dead(dst)) continue;
       survivingSrcs.add(v);
       survivingDsts.add(dst);
       survivingTypes.add(base.edgeTypeOut[i]);
@@ -134,9 +169,7 @@ Csr foldOverlayIntoCsr({
     final eid = entry.key;
     final e = entry.value;
     if (deletedEdges.contains(eid)) continue;
-    if (deletedNodes.contains(e.src) || deletedNodes.contains(e.dst)) {
-      continue;
-    }
+    if (dead(e.src) || dead(e.dst)) continue;
     survivingSrcs.add(e.src);
     survivingDsts.add(e.dst);
     survivingTypes.add(e.typeId);

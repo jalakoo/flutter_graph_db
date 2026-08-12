@@ -116,6 +116,15 @@ void apply(
     case DropConstraint(:final name):
       state.applyDropConstraint(name);
       return;
+    case DeclareColumn(:final owner, :final keyId, :final type):
+      state.applyDeclareColumn(owner, keyId, type);
+      return;
+    case DeclareIndex(:final owner, :final spec):
+      state.applyDeclareIndex(owner, spec);
+      return;
+    case DropIndex(:final owner, :final name):
+      state.applyDropIndex(owner, name);
+      return;
   }
 }
 

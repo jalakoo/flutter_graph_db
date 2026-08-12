@@ -197,6 +197,13 @@ class PropertyStore {
   ColumnType? columnType(int keyId) => _columns[keyId]?.type;
   int get columnCount => _columns.length;
 
+  /// Every keyId that currently has a column, in unspecified order.
+  /// Includes columns declared ahead of any write (`createColumn` /
+  /// `IndexSpec.valueType`), which is what makes it the right input for
+  /// the snapshot codec: the encoder must round-trip a declared-but-empty
+  /// column so its type-lock survives a restart.
+  Iterable<int> get columnKeyIds => _columns.keys;
+
   // ---------------------------------------------------------------- writes
 
   void setInt(int vid, int keyId, int value) {

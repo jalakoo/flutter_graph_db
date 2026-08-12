@@ -32,6 +32,15 @@ store without seeing CBOR records.
 The native and web adapters live behind separate imports so a web
 build keeps `dart:io` out of its dependency cone (and vice versa).
 
+**Compaction cost.** Only `SegmentedInMemoryWalStore` implements the
+rotated-segment layout where `truncate` is an O(1) segment delete.
+`IoWalStore` is single-file: it stages the retained tail in a
+`<path>.compact` temp file, fsyncs it, and renames it over the WAL. That
+makes compaction atomic — a crash leaves either the old complete WAL or
+the new one — and bounds its memory to a 64 KiB buffer, but it still
+rewrites the retained bytes each time. Rotated segments for the file
+adapter remain a carry-forward.
+
 ## Quick reference
 
 ```dart
@@ -63,7 +72,7 @@ The `encodeSnapshot` / `decodeSnapshot` codec in `graph_db_core` pairs
 with `compactToCurrentTip` here so the WAL doesn't grow unbounded.
 
 ```dart
-db.state.mergeNow(); // codec invariant: overlay must be empty
+db.mergeNow(); // codec invariant: overlay must be empty
 final snap = encodeSnapshot(db.state);
 await File('graph.snapshot').writeAsBytes(snap.bytes);
 await compactToCurrentTip(store: store);

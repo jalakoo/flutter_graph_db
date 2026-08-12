@@ -1,15 +1,14 @@
-# Cross-platform CI for the flutter_graph_db monorepo (plan §14 Phase 0 #10).
+# Cross-platform CI for the flutter_graph_db monorepo.
 #
-# Matrix: Ubuntu + Windows + macOS. Each runner:
-#   1. Resolves all Dart packages.
-#   2. Runs `dart analyze` + `dart test` per pure-Dart package.
-#   3. Runs `flutter analyze` + `flutter build web --release` for the
-#      example app (Wasm dry-run on Linux only — it's the slowest leg
-#      and dart2wasm is platform-independent).
+# The repo is a **pub workspace**: one `flutter pub get` at the root
+# resolves every member, so there is no per-package `pub get` step.
 #
-# NOTE: This workflow has NOT been run yet — it is scaffolded
-# blind and will be validated on first push. Adjust the SDK / Flutter
-# channel + Linux-only Wasm gate once the first matrix run reports.
+# Coverage:
+#   * analyze + test every package (previously only 3 of 9 ran)
+#   * browser tests for the IndexedDB adapters (`-p chrome`)
+#   * the example app: analyze, test, and web + wasm builds
+#   * publish dry-run, so missing LICENSE / CHANGELOG / repository
+#     metadata fails here rather than at release time
 
 name: ci
 
@@ -24,71 +23,187 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Pinned rather than tracking `stable`, so a Flutter release can't turn
+  # a green branch red without a commit. Bump deliberately.
+  FLUTTER_VERSION: 3.44.7
+
 jobs:
+  # ---------------------------------------------------------------- analyze
+  # Format + analyze once — neither is platform-dependent, so running it
+  # on three OSes would just triple the cost.
+  analyze:
+    name: analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter --version
+      - name: Resolve workspace
+        run: flutter pub get
+      - name: Analyze (all packages + example)
+        run: dart analyze --fatal-infos
+      # A `dart format` gate is NOT enabled yet: 108 of 208 files predate
+      # the current formatter and would fail. Land the formatting-only
+      # commit first, then add:
+      #   - run: dart format --output=none --set-exit-if-changed .
+      - name: Report formatting drift (non-blocking)
+        run: dart format --output=none --set-exit-if-changed . || true
+
+  # ------------------------------------------------------------------- test
+  # Pure-Dart packages, on all three host platforms: `IoWalStore` has
+  # platform-specific path and rename behaviour (the Windows
+  # rename-over-existing fallback in particular), so it must be exercised
+  # on Windows and macOS too.
   test:
-    name: ${{ matrix.os }}
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Flutter (stable)
-        # Pulls the matching Dart SDK transitively. Stable channel is
-        # the floor the plan pins (Dart 3.5+).
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
-
-      - name: Show toolchain versions
-        run: |
-          flutter --version
-          dart --version
-
-      # --- Pure-Dart packages: analyze + test ----------------------------
-      # Each package is independent; `dart pub get` per pkg keeps the
-      # `_test.dart` resolution scope tight and surfaces missing deps.
+      - name: Resolve workspace
+        run: flutter pub get
 
       - name: graph_db_core
         working-directory: packages/graph_db_core
-        run: |
-          dart pub get
-          dart analyze
-          dart test
-
+        run: dart test
       - name: graph_db_wal
         working-directory: packages/graph_db_wal
-        run: |
-          dart pub get
-          dart analyze
-          dart test
-
+        run: dart test
+      - name: graph_db_gql
+        working-directory: packages/graph_db_gql
+        run: dart test
+      - name: graph_db_remote
+        working-directory: packages/graph_db_remote
+        run: dart test
+      - name: graph_db_remote_neo4j
+        working-directory: packages/graph_db_remote_neo4j
+        run: dart test
+      - name: graph_db_remote_falkor
+        working-directory: packages/graph_db_remote_falkor
+        run: dart test
+      - name: graph_db_sync
+        working-directory: packages/graph_db_sync
+        run: dart test
       - name: graph_db_bench
         working-directory: packages/graph_db_bench
-        run: |
-          dart pub get
-          dart analyze
-          dart test
+        run: dart test
+      - name: flutter_graph_db (umbrella)
+        working-directory: packages/flutter_graph_db
+        run: dart test
 
-      # --- Flutter example: analyze + web build --------------------------
-      # Web build is the canary for plan §11 (web is a soft requirement
-      # but a hard compile constraint — no native-only imports may leak
-      # into the umbrella exports).
+  # ----------------------------------------------------------------- browser
+  # Web-compatibility gate. Nothing ran under a browser before, which is
+  # how the `graph_db_wal` breakage below went unnoticed: the example app
+  # is the web-build canary but depends on `graph_db_core` alone, so it
+  # never compiled the WAL for web.
+  browser:
+    name: browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Resolve workspace
+        run: flutter pub get
 
-      - name: example — analyze + web
+      - name: graph_db_core (chrome)
+        # Guards the web-compatibility constraint: no `dart:io` and no
+        # 64-bit typed lists may leak into the engine's dependency cone.
+        # This one is expected to pass and is a hard gate.
+        working-directory: packages/graph_db_core
+        run: dart test -p chrome
+
+      - name: graph_db_wal (chrome)
+        # KNOWN FAILING — non-blocking on purpose.
+        #
+        # `graph_db_wal` does not compile to JS: `package:xxh3` (the WAL
+        # record checksum) contains 64-bit integer literals that dart2js
+        # rejects outright — "The integer literal 0x9E3779B185EBCA87 can't
+        # be represented exactly in JavaScript". So the IndexedDB WAL and
+        # snapshot adapters cannot currently be used on a dart2js target
+        # at all, and their `@TestOn('browser')` suites cannot run.
+        #
+        # `WalCodec`'s own doc comment anticipates a milder version of
+        # this (a 53-bit-safe checksum being needed on web); in reality it
+        # is a compile failure, not a precision loss. Fixing it means
+        # choosing a web-safe checksum and versioning the WAL frame
+        # format, so it is left as an explicit decision rather than
+        # silently changed. Flip this to a hard gate once that lands.
+        continue-on-error: true
+        working-directory: packages/graph_db_wal
+        run: dart test -p chrome
+
+  # ----------------------------------------------------------------- example
+  # The web build is the canary for the web-compile constraint: no
+  # native-only import may leak into the umbrella exports.
+  example:
+    name: example (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Resolve workspace
+        run: flutter pub get
+      - name: Test
         working-directory: example
-        run: |
-          flutter pub get
-          flutter analyze
-          flutter build web --release
-
-      - name: example — wasm (linux only)
-        # dart2wasm output is platform-independent; one runner is
-        # enough. Linux is the cheapest runner.
+        run: flutter test
+      - name: Build web
+        working-directory: example
+        run: flutter build web --release
+      - name: Build wasm (linux only)
+        # dart2wasm output is platform-independent; one runner is enough.
         if: matrix.os == 'ubuntu-latest'
         working-directory: example
         run: flutter build web --wasm --release
+
+  # ----------------------------------------------------------------- publish
+  # Catches the metadata that blocks a release — missing LICENSE, missing
+  # CHANGELOG, absent `repository` — at PR time instead of release time.
+  #
+  # `continue-on-error` because every package is still `publish_to: none`
+  # with path dependencies: the dry-run reports those as blockers by
+  # design. Drop the flag once the packages are actually released.
+  publish-dry-run:
+    name: publish dry-run
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Resolve workspace
+        run: flutter pub get
+      - name: Dry-run every publishable package
+        run: |
+          for pkg in packages/*/; do
+            echo "::group::$pkg"
+            (cd "$pkg" && dart pub publish --dry-run) || true
+            echo "::endgroup::"
+          done

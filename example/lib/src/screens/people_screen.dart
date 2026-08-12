@@ -92,7 +92,9 @@ class PeopleScreen extends StatelessWidget {
       ),
       body: ListView.separated(
         itemCount: personVids.length,
-        separatorBuilder: (_, _) => const Divider(height: 1),
+        // Named rather than two `_`s: wildcard variables need language
+        // version 3.7, and this app targets the repo-wide 3.6 floor.
+        separatorBuilder: (context, index) => const Divider(height: 1),
         itemBuilder: (context, i) {
           final vid = personVids[i];
           final name = db.getNodeStringProp(vid, view.nameKey);
@@ -105,7 +107,7 @@ class PeopleScreen extends StatelessWidget {
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               Navigator.of(context).push(
-                MaterialPageRoute(
+                MaterialPageRoute<void>(
                   builder: (_) => PersonDetailScreen(vid: vid),
                 ),
               );

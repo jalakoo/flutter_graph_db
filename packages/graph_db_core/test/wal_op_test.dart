@@ -75,6 +75,9 @@ void main() {
           DeclareConstraint() => 'declareConstraint',
           DropConstraint() => 'dropConstraint',
           InternString() => 'internString',
+          DeclareColumn() => 'declareColumn',
+          DeclareIndex() => 'declareIndex',
+          DropIndex() => 'dropIndex',
         };
     expect(describe(const BeginTxn()), 'beginTxn');
     expect(describe(const DelNode(Vid(1))), 'delNode');
@@ -85,6 +88,25 @@ void main() {
         kind: StringKind.propKey,
       )),
       'internString',
+    );
+    expect(
+      describe(const DeclareColumn(
+        owner: PropertyOwner.node,
+        keyId: 0,
+        type: ColumnType.int_,
+      )),
+      'declareColumn',
+    );
+    expect(
+      describe(const DeclareIndex(
+        owner: PropertyOwner.edge,
+        spec: IndexSpec(name: 'i', keyId: 0, kind: EqualityRange()),
+      )),
+      'declareIndex',
+    );
+    expect(
+      describe(const DropIndex(owner: PropertyOwner.node, name: 'i')),
+      'dropIndex',
     );
   });
 }

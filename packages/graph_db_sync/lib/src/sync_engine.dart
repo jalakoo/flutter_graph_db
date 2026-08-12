@@ -21,6 +21,7 @@ import 'package:graph_db_remote/graph_db_remote.dart';
 import 'package:graph_db_wal/graph_db_wal.dart';
 
 import '_diag.dart';
+import 'sync_state_store.dart';
 import 'sync_target.dart';
 
 /// Substituted for remote `ImportNode.labels` that arrive empty —
@@ -86,13 +87,50 @@ class SyncEngine {
   /// `5_MULTILABEL_PLAN.md` §19.10.3.
   String? unlabeledFallback;
 
+  /// Optional durable store for each target's high-water mark.
+  ///
+  /// When set, [restore] reloads the HWMs at startup and every
+  /// acknowledged batch is persisted, so a restart resumes where it left
+  /// off. When `null` the HWMs live only in memory and a restart
+  /// re-ships the whole retained WAL to every target — safe only if the
+  /// remote's `bulkImport` is idempotent.
+  final SyncStateStore? stateStore;
+
   SyncEngine({
     required this.db,
     required this.walStore,
     required this.targets,
     this.importBatchSize = 1024,
     this.unlabeledFallback = kDefaultUnlabeledFallback,
+    this.stateStore,
   });
+
+  /// Loads persisted per-target progress from [stateStore] into
+  /// [targets]. Call once after construction and before the first
+  /// [syncOnce]; a no-op when no store is configured.
+  ///
+  /// Targets with no persisted entry keep their in-memory defaults, so
+  /// adding a new target to an existing deployment seeds it normally.
+  Future<void> restore() async {
+    final store = stateStore;
+    if (store == null) return;
+    final states = await store.readAll();
+    for (final target in targets) {
+      final state = states[target.name];
+      if (state == null) continue;
+      target.hwm = state.hwm;
+      target.seeded = state.seeded;
+    }
+  }
+
+  Future<void> _persist(SyncTarget target) async {
+    final store = stateStore;
+    if (store == null) return;
+    await store.write(
+      target.name,
+      SyncTargetState(hwm: target.hwm, seeded: target.seeded),
+    );
+  }
 
   /// Used by ingest paths that consume `ImportNode.labels` — applies
   /// the [unlabeledFallback] policy and emits the console warning on
@@ -135,6 +173,9 @@ class SyncEngine {
       seededOnThisRun = true;
       // After a seed, the target is at the current local LSN.
       target.hwm = db.currentLsn;
+      // Persist immediately: a crash between here and the first batch
+      // would otherwise re-run the whole export on restart.
+      await _persist(target);
     }
 
     // Drain WAL past target.hwm.
@@ -191,6 +232,9 @@ class SyncEngine {
     try {
       await target.client.bulkImport(Stream.fromIterable(ops));
       target.hwm = batchTipLsn;
+      // Persist per acknowledged batch, not per run: a crash mid-run then
+      // re-ships only the unacknowledged tail.
+      await _persist(target);
       return true;
     } on RemoteException catch (e) {
       // Quarantine the whole batch — v1 is coarse-grained. Polish
@@ -303,8 +347,10 @@ class SyncEngine {
   }
 
   /// Converts a sequenced WAL op into the adapter-side [ImportOp]
-  /// shape. Returns `null` for ops that don't map to a graph
-  /// element (BeginTxn / CommitTxn / InternString / constraint ops).
+  /// shape. Returns `null` for ops that don't map to a graph element —
+  /// framing (BeginTxn / CommitTxn), local catalog growth
+  /// (InternString), constraint ops, and local schema ops (column and
+  /// index declarations).
   ImportOp? _walOpToImport(SequencedWalOp seq) {
     final op = seq.op;
     switch (op) {
@@ -347,6 +393,14 @@ class SyncEngine {
       case InternString():
       case DeclareConstraint():
       case DropConstraint():
+      // Local storage-layout concerns: column type-locks and secondary
+      // indexes describe how *this* engine stores and looks up data.
+      // Remote targets own their own schema and indexes, so these never
+      // ship — dropped rather than quarantined, since there is nothing
+      // for the remote to reject.
+      case DeclareColumn():
+      case DeclareIndex():
+      case DropIndex():
         return null;
     }
   }

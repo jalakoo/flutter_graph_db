@@ -36,6 +36,17 @@ class TransferableCsr {
   final TransferableTypedData labelRowPtr;
   final TransferableTypedData labels;
 
+  /// `eid -> endpoint` maps. Transferred so the worker's fold result
+  /// arrives complete and `installMergedCsr` is a pointer swap; the main
+  /// isolate used to rebuild these with three O(V+E) passes per install.
+  final TransferableTypedData eidToSrc;
+  final TransferableTypedData eidToDst;
+
+  /// Node tombstones (`Uint8List`), or `null` when the CSR has none.
+  /// Must round-trip: dropping it here would resurrect every deleted
+  /// node on the first worker-isolate merge.
+  final TransferableTypedData? nodeTombstones;
+
   TransferableCsr({
     required this.nodeCount,
     required this.edgeCount,
@@ -51,6 +62,9 @@ class TransferableCsr {
     required this.labelOf,
     required this.labelRowPtr,
     required this.labels,
+    required this.eidToSrc,
+    required this.eidToDst,
+    this.nodeTombstones,
   });
 
   /// Copies every `Uint32List` of [csr] into a fresh buffer and wraps
@@ -76,11 +90,19 @@ class TransferableCsr {
       labelOf: _wrapCopy(csr.labelOf),
       labelRowPtr: _wrapCopy(csr.labelRowPtr),
       labels: _wrapCopy(csr.labels),
+      eidToSrc: _wrapCopy(csr.eidToSrc),
+      eidToDst: _wrapCopy(csr.eidToDst),
+      nodeTombstones: csr.nodeTombstones == null
+          ? null
+          : _wrapCopyU8(csr.nodeTombstones!),
     );
   }
 
   static TransferableTypedData _wrapCopy(Uint32List src) =>
       TransferableTypedData.fromList([Uint32List.fromList(src)]);
+
+  static TransferableTypedData _wrapCopyU8(Uint8List src) =>
+      TransferableTypedData.fromList([Uint8List.fromList(src)]);
 
   /// Reconstructs a [Csr] on the receiving side. Each
   /// `materialize()` may be called exactly once.
@@ -96,10 +118,17 @@ class TransferableCsr {
     final labelOfM = labelOf.materialize().asUint32List();
     final labelRowPtrM = labelRowPtr.materialize().asUint32List();
     final labelsM = labels.materialize().asUint32List();
-    // Rebuild labelIndex from the ragged labels.
+    final eidToSrcM = eidToSrc.materialize().asUint32List();
+    final eidToDstM = eidToDst.materialize().asUint32List();
+    final tombstonesM = nodeTombstones?.materialize().asUint8List();
+    // Rebuild labelIndex from the ragged labels. Tombstoned rows are
+    // excluded, matching `Csr.fromEdges`.
     final effLabelCount = labelCount == 0 ? 1 : labelCount;
+    bool tombstoned(int v) =>
+        tombstonesM != null && v < tombstonesM.length && tombstonesM[v] != 0;
     final counts = Uint32List(effLabelCount);
     for (var v = 0; v < nodeCount; v++) {
+      if (tombstoned(v)) continue;
       final end = labelRowPtrM[v + 1];
       for (var i = labelRowPtrM[v]; i < end; i++) {
         final l = labelsM[i];
@@ -112,6 +141,7 @@ class TransferableCsr {
     }
     final fill = Uint32List(effLabelCount);
     for (var v = 0; v < nodeCount; v++) {
+      if (tombstoned(v)) continue;
       final end = labelRowPtrM[v + 1];
       for (var i = labelRowPtrM[v]; i < end; i++) {
         final l = labelsM[i];
@@ -133,6 +163,9 @@ class TransferableCsr {
       labelRowPtr: labelRowPtrM,
       labels: labelsM,
       labelIndex: labelIndex,
+      eidToSrc: eidToSrcM,
+      eidToDst: eidToDstM,
+      nodeTombstones: tombstonesM,
     );
   }
 }

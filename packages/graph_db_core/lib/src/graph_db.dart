@@ -47,6 +47,13 @@ class GraphDb {
   /// the order it was applied.
   final List<InternString> _pendingInterns = [];
 
+  /// Schema ops (`DeclareColumn` / `DeclareIndex` / `DropIndex`) queued
+  /// between transactions. Flushed after [_pendingInterns] — a column or
+  /// index declaration names a keyId, so the intern that minted it must
+  /// be sequenced first — and before the transaction's own ops, so a
+  /// write into a freshly-declared column replays in the right order.
+  final List<WalOp> _pendingSchemaOps = [];
+
   /// Set by the first [close] call. Guards against double-close: a
   /// second `close()` re-invoking the underlying sink's `close()` is not
   /// guaranteed idempotent, so we make it a no-op here instead.
@@ -74,25 +81,45 @@ class GraphDb {
   factory GraphDb.fromState(MutableGraphState state, {WalSink? sink}) =>
       GraphDb._(state, sink);
 
+  /// True once [close] has run. Writes are refused from this point on;
+  /// reads keep working against the final in-memory state.
+  bool get isClosed => _closed;
+
   /// Closes the engine: flushes any pending `InternString` ops as a
   /// final empty-but-not-quite commit (if a sink is configured), then
   /// closes the sink.
   ///
   /// **Idempotent** — the second and later calls are no-ops and return
-  /// without touching the sink. After close, commit attempts still fail
-  /// at the sink layer. Returns immediately once closed.
+  /// without touching the sink. Returns immediately once closed.
+  ///
+  /// After close, [runTransaction] and [bulkAddEdges] throw
+  /// [StateError]. They used to fail only at the sink layer, which meant
+  /// an in-memory engine (no sink) silently accepted writes that could
+  /// never be persisted.
   Future<void> close() async {
+    // Set before the first `await` so a second (concurrent, un-awaited)
+    // close returns immediately rather than double-closing the sink.
     if (_closed) return;
     _closed = true;
-    if (_sink != null && _pendingInterns.isNotEmpty) {
-      // Flush pending interns through an empty user-op txn so they
-      // land in the WAL with proper Begin/Commit framing. Use
-      // `fsync` so the close-time data is durable before the sink
-      // shuts down — group-commit's deferred ack would otherwise
-      // race with `close`.
-      await runTransaction((_) {}, durability: Durability.fsync);
+    if (_sink != null &&
+        (_pendingInterns.isNotEmpty || _pendingSchemaOps.isNotEmpty)) {
+      // Flush pending interns + schema ops so they land in the WAL with proper
+      // Begin/Commit framing. Use `fsync` so the close-time data is
+      // durable before the sink shuts down — group-commit's deferred ack
+      // would otherwise race with `close`. Goes straight to `_commit`
+      // rather than through `runTransaction`, whose closed-engine guard
+      // would (correctly) refuse this write.
+      final txn = Transaction(_state.allocTxnId(), _state);
+      _terminate(txn);
+      await _commit(txn, Durability.fsync);
     }
     await _sink?.close();
+  }
+
+  void _rejectIfClosed(String op) {
+    if (_closed) {
+      throw StateError('$op after close() — the engine is closed');
+    }
   }
 
   // ---------------------------------------------------------------- catalog
@@ -178,10 +205,17 @@ class GraphDb {
   }
 
   /// Narrow, read-only window onto committed graph state — the seam the
-  /// GQL package reads through instead of the engine state. Deliberately
-  /// **unguarded** (backed by `_state`, not `_r`): a `MATCH … SET` can
-  /// evaluate a read-dependent right-hand side while mutations are
-  /// buffered in the same transaction. See [GraphReadView].
+  /// GQL package reads through instead of the engine state. See
+  /// [GraphReadView].
+  ///
+  /// **Different visibility rules from the rest of this class.**
+  /// Deliberately unguarded (backed by `_state`, not `_r`): a
+  /// `MATCH … SET` has to evaluate a read-dependent right-hand side while
+  /// its own mutations sit buffered in the same transaction, which the
+  /// public read API refuses to do. So inside a transaction, `db.nodeCount`
+  /// throws after the first write while `db.readView` keeps answering from
+  /// the committed-as-of-begin state. Outside a transaction the two agree.
+  /// Prefer the guarded surface unless you are writing an executor.
   GraphReadView get readView => _state;
 
   // -------------------------------------------------------------- topology
@@ -364,19 +398,26 @@ class GraphDb {
   /// Pass [label] to scan only nodes carrying that label; omit it to scan
   /// every node. **Read-your-writes** — committed mutations are seen
   /// immediately. An absent or NULL property never matches a non-null
-  /// [value]. Boxes each candidate at the boundary; for lookup by a
-  /// unique id, prefer the O(1) [nodeByLogicalId].
+  /// [value]. For lookup by a unique id, prefer the O(1)
+  /// [nodeByLogicalId].
+  ///
+  /// Allocation-free per candidate: the column type is resolved once and
+  /// the comparison reads the raw typed slot. It used to box every row
+  /// into a `PropValue` just to `==` it, which cost one allocation per
+  /// node scanned.
   Vid? findNodeByProp(int keyId, PropValue value, {int? label}) {
     final s = _r;
+    final match = _rawMatcher(s.nodeProps, keyId, value);
+    if (match == null) return null; // type mismatch — nothing can match
     if (label != null) {
       for (final raw in s.effectiveLabelScan(label)) {
-        if (s.nodeProps.getBoxed(raw, keyId) == value) return Vid(raw);
+        if (match(raw)) return Vid(raw);
       }
       return null;
     }
     final n = s.nextVid;
     for (var v = 0; v < n; v++) {
-      if (s.nodeProps.getBoxed(v, keyId) == value) return Vid(v);
+      if (match(v)) return Vid(v);
     }
     return null;
   }
@@ -387,17 +428,64 @@ class GraphDb {
   List<Vid> findNodesByProp(int keyId, PropValue value, {int? label}) {
     final s = _r;
     final out = <Vid>[];
+    final match = _rawMatcher(s.nodeProps, keyId, value);
+    if (match == null) return out;
     if (label != null) {
       for (final raw in s.effectiveLabelScan(label)) {
-        if (s.nodeProps.getBoxed(raw, keyId) == value) out.add(Vid(raw));
+        if (match(raw)) out.add(Vid(raw));
       }
     } else {
       final n = s.nextVid;
       for (var v = 0; v < n; v++) {
-        if (s.nodeProps.getBoxed(v, keyId) == value) out.add(Vid(v));
+        if (match(v)) out.add(Vid(v));
       }
     }
     return out;
+  }
+
+  /// Builds an `id -> bool` equality test against the raw column for
+  /// [keyId], or `null` when [value]'s type can't match the column's (so
+  /// the caller can skip the scan entirely).
+  ///
+  /// Each returned closure re-checks `has(id, keyId)` so an absent or
+  /// explicitly-NULL slot never matches a non-null [value] — the same
+  /// contract the boxed comparison had.
+  bool Function(int id)? _rawMatcher(
+    PropertyStore store,
+    int keyId,
+    PropValue value,
+  ) {
+    final type = store.columnType(keyId);
+    if (type == null) return null; // no column — no row can match
+    switch (value) {
+      case PropInt(value: final q):
+        if (type == ColumnType.int_) {
+          return (id) => store.has(id, keyId) && store.getInt(id, keyId) == q;
+        }
+        // `stringId` columns hold interned ids, compared as ints — this
+        // mirrors what the boxed form did for a PropInt query.
+        if (type == ColumnType.stringId) {
+          return (id) =>
+              store.has(id, keyId) && store.getStringId(id, keyId) == q;
+        }
+        return null;
+      case PropDouble(value: final q):
+        if (type != ColumnType.double_) return null;
+        return (id) => store.has(id, keyId) && store.getDouble(id, keyId) == q;
+      case PropBool(value: final q):
+        if (type != ColumnType.bool_) return null;
+        return (id) => store.has(id, keyId) && store.getBool(id, keyId) == q;
+      case PropString(value: final q):
+        if (type != ColumnType.string) return null;
+        return (id) => store.has(id, keyId) && store.getString(id, keyId) == q;
+      case PropNull():
+        // Matches a slot that is present but explicitly NULL.
+        return (id) => store.has(id, keyId) && store.isNull(id, keyId);
+      case PropList():
+      case PropMap():
+        // Never storable in a typed column, so never findable.
+        return null;
+    }
   }
 
   // ------------------------------------------------------------- logical id
@@ -455,6 +543,7 @@ class GraphDb {
     Durability durability = Durability.group,
     bool capturePrevValues = false,
   }) async {
+    _rejectIfClosed('runTransaction');
     if (_state.activeTxnId != null) {
       throw StateError(
           'a transaction (txnId=${_state.activeTxnId}) is already in '
@@ -482,13 +571,18 @@ class GraphDb {
     } finally {
       _terminate(txn);
       _state.activeTxnId = null;
+      _state.activeTxnHasWrites = false;
     }
   }
 
   Future<void> _commit(Transaction txn, Durability durability) async {
-    // Skip empty txn only when there are no pending interns either —
-    // otherwise we still need to flush the catalog growth.
-    if (txn.bufferedOps.isEmpty && _pendingInterns.isEmpty) return;
+    // Skip empty txn only when there is no queued schema growth either —
+    // otherwise we still need to flush it.
+    if (txn.bufferedOps.isEmpty &&
+        _pendingInterns.isEmpty &&
+        _pendingSchemaOps.isEmpty) {
+      return;
+    }
     final ops = <SequencedWalOp>[];
     final beginLsn = _state.allocLsn();
     ops.add(SequencedWalOp(
@@ -499,6 +593,14 @@ class GraphDb {
     // InternString catalog ops first so any user op that references a
     // new keyId / labelId is sequenced after its declaration.
     for (final op in _pendingInterns) {
+      ops.add(SequencedWalOp(
+        lsn: _state.allocLsn(),
+        txnId: txn.txnId,
+        op: op,
+      ));
+    }
+    // Then schema declarations, which reference those ids.
+    for (final op in _pendingSchemaOps) {
       ops.add(SequencedWalOp(
         lsn: _state.allocLsn(),
         txnId: txn.txnId,
@@ -525,14 +627,22 @@ class GraphDb {
     if (_sink != null) {
       await _sink.appendBatch(ops, durability: durability);
     }
-    // InternString ops were applied at intern-time (the string is
-    // already in the local interner). Skip them on apply so we don't
-    // trigger the CorruptionDetected mismatch guard.
+    // InternString and schema ops were already applied eagerly (the
+    // string is in the local interner; the column / index exists). Skip
+    // them on apply — re-applying an intern trips the CorruptionDetected
+    // mismatch guard, and re-applying a DeclareIndex would rebuild an
+    // index that is already correct.
     for (final seq in ops) {
-      if (seq.op is InternString) continue;
+      if (seq.op is InternString ||
+          seq.op is DeclareColumn ||
+          seq.op is DeclareIndex ||
+          seq.op is DropIndex) {
+        continue;
+      }
       apply(_state, seq, recovery: false);
     }
     _pendingInterns.clear();
+    _pendingSchemaOps.clear();
     // After applying, check the overlay merge threshold. Uses the
     // worker isolate when a coordinator is wired, otherwise falls back
     // to the synchronous main-isolate fold.
@@ -558,16 +668,23 @@ class GraphDb {
   /// Current next-LSN — the LSN the next committed op will receive.
   int get nextLsn => _state.nextLsn;
 
-  /// Active pins on this engine. Tests + tooling use this; v1
-  /// doesn't enforce isolation against the pin set, but future
-  /// MVCC uses it to gate version retention.
+  /// Active pins on this engine.
+  ///
+  /// **Observational only.** Nothing in the engine reads this set to gate
+  /// anything: there is no MVCC, and a pin does not stop the overlay from
+  /// merging or a version from being overwritten. It exists so the API
+  /// shape is in place for that work.
   final Set<LsnPin> _activePins = {};
   int get activePinCount => _activePins.length;
 
   /// Captures the current LSN as a [LsnPin] — see [LsnPin] /
-  /// [IsolationLevel] for v1 semantics. Release the pin via
-  /// `pin.release()` when done so future MVCC enforcement doesn't
-  /// retain old versions on your behalf.
+  /// [IsolationLevel] for v1 semantics.
+  ///
+  /// A pin holds no version and blocks nothing (see [_activePins]); it
+  /// records an LSN you can compare later. Call `pin.release()` when done
+  /// — not because anything is retained on your behalf, but because an
+  /// unreleased pin stays in the set and [activePinCount] drifts upward
+  /// for the life of the engine.
   LsnPin pinLsn({
     IsolationLevel isolation = IsolationLevel.snapshot,
   }) {
@@ -607,6 +724,7 @@ class GraphDb {
     List<BulkEdge> edges, {
     Durability durability = Durability.group,
   }) async {
+    _rejectIfClosed('bulkAddEdges');
     if (_state.activeTxnId != null) {
       throw StateError(
           'cannot bulkAddEdges while txnId=${_state.activeTxnId} is in '
@@ -650,6 +768,13 @@ class GraphDb {
           op: intern,
         ));
       }
+      for (final op in _pendingSchemaOps) {
+        ops.add(SequencedWalOp(
+          lsn: _state.allocLsn(),
+          txnId: txnId,
+          op: op,
+        ));
+      }
       for (var i = 0; i < edges.length; i++) {
         final e = edges[i];
         ops.add(SequencedWalOp(
@@ -677,6 +802,7 @@ class GraphDb {
         await _sink.appendBatch(ops, durability: durability);
       }
       _pendingInterns.clear();
+      _pendingSchemaOps.clear();
 
       // 5. Apply: fold any pending overlay into the CSR first so the
       //    bulk addition sits on a clean base, then build a temporary
@@ -699,9 +825,19 @@ class GraphDb {
       final fresh = foldOverlayIntoCsr(base: _state.csr, overlay: tmp);
       _state.installMergedCsr(fresh);
 
+      // Post-commit hook, same as `_commit`. Omitting it here meant the
+      // one path that grows the WAL fastest was invisible to the
+      // auto-checkpoint coordinator, so a bulk import never triggered a
+      // checkpoint however large it was.
+      afterCommit?.call();
+
       return eids;
     } finally {
       _state.activeTxnId = null;
+      // Reset alongside `activeTxnId`. Leaving it set relied on the next
+      // `runTransaction` clearing it — true today, but the read guard
+      // reads both flags and they should never disagree.
+      _state.activeTxnHasWrites = false;
     }
   }
 
@@ -721,9 +857,10 @@ class GraphDb {
   /// on-ramp.
   ///
   /// Non-transactional — interning and column declaration are direct
-  /// schema ops. Column declarations are not journaled, so call once after
-  /// each open: a re-declaration matching the persisted type no-ops, a
-  /// conflicting one throws [ConstraintViolation] (the recovery fail-fast).
+  /// schema ops, journaled with the next commit rather than wrapped in one.
+  /// Both survive a restart, so calling this again after reopening is
+  /// optional: a re-declaration matching the persisted type no-ops, a
+  /// conflicting one throws [ConstraintViolation] (the type-lock guard).
   GraphSchema defineSchema({
     Set<String> labels = const {},
     Set<String> edgeTypes = const {},
@@ -737,23 +874,60 @@ class GraphDb {
   /// finders, and [createNodePropertyIndex] can bind to an empty column.
   /// Idempotent when the type matches; throws [ConstraintViolation] if
   /// [keyId] already carries a column of a different type (the type-lock
-  /// guard). A non-transactional schema op, like [createNodePropertyIndex]:
-  /// column declarations are not journaled (they are rebuilt from data on
-  /// recovery), so re-declare on each open.
+  /// guard).
+  ///
+  /// **Journaled** — the declaration is recorded in the WAL, so the
+  /// type-lock survives a restart and there is no need to re-declare on
+  /// each open. Applies immediately; the WAL record is flushed with the
+  /// next commit (or by [close]), like an intern.
   void declareNodeColumn(int keyId, ColumnType type) =>
-      _state.nodeProps.createColumn(keyId, type);
+      _declareColumn(PropertyOwner.node, keyId, type);
+
+  /// Edge-store counterpart of [declareNodeColumn].
+  void declareEdgeColumn(int keyId, ColumnType type) =>
+      _declareColumn(PropertyOwner.edge, keyId, type);
+
+  void _declareColumn(PropertyOwner owner, int keyId, ColumnType type) {
+    _rejectIfClosed('declareColumn');
+    // Apply first so a conflicting type throws before anything is
+    // journaled.
+    _state.applyDeclareColumn(owner, keyId, type);
+    if (_sink != null) {
+      _pendingSchemaOps
+          .add(DeclareColumn(owner: owner, keyId: keyId, type: type));
+    }
+  }
 
   /// Builds a node-property index from the current state. Fires
   /// [onIndexSizeEvent] if the new index is at or above the soft
-  /// budget. The default (non-incremental, non-deferred) index reflects
-  /// the loaded fixture and does not update with mutations.
+  /// budget.
+  ///
+  /// **Journaled** — the declaration is recorded in the WAL and the index
+  /// is rebuilt from recovered data on the next open, so it no longer has
+  /// to be re-created by hand after a restart. Index *contents* are
+  /// derived and are not written to the log.
+  ///
+  /// The default (non-incremental, non-deferred) index is rebuilt on
+  /// every write that touches its key; see [IndexSpec] for the
+  /// incremental and deferred variants.
   SecondaryIndex createNodePropertyIndex(IndexSpec spec) =>
-      _state.createNodePropertyIndex(spec, onSizeEvent: onIndexSizeEvent);
+      _createIndex(PropertyOwner.node, spec);
 
   /// Builds an edge-property index from the current state. See
   /// [createNodePropertyIndex] for semantics.
   SecondaryIndex createEdgePropertyIndex(IndexSpec spec) =>
-      _state.createEdgePropertyIndex(spec, onSizeEvent: onIndexSizeEvent);
+      _createIndex(PropertyOwner.edge, spec);
+
+  SecondaryIndex _createIndex(PropertyOwner owner, IndexSpec spec) {
+    _rejectIfClosed('createPropertyIndex');
+    final idx = owner == PropertyOwner.node
+        ? _state.createNodePropertyIndex(spec, onSizeEvent: onIndexSizeEvent)
+        : _state.createEdgePropertyIndex(spec, onSizeEvent: onIndexSizeEvent);
+    if (_sink != null) {
+      _pendingSchemaOps.add(DeclareIndex(owner: owner, spec: spec));
+    }
+    return idx;
+  }
 
   /// Looks up a registered node-property index by name.
   SecondaryIndex? getNodeIndex(String name) => _state.getNodeIndex(name);
@@ -762,10 +936,24 @@ class GraphDb {
   SecondaryIndex? getEdgeIndex(String name) => _state.getEdgeIndex(name);
 
   /// Removes a node-property index from the registry. Returns the
-  /// removed index, or `null` if no such index existed.
-  SecondaryIndex? dropNodeIndex(String name) => _state.dropNodeIndex(name);
+  /// removed index, or `null` if no such index existed. Journaled, so the
+  /// drop survives a restart.
+  SecondaryIndex? dropNodeIndex(String name) =>
+      _dropIndex(PropertyOwner.node, name);
 
   /// Removes an edge-property index from the registry. Returns the
   /// removed index, or `null` if no such index existed.
-  SecondaryIndex? dropEdgeIndex(String name) => _state.dropEdgeIndex(name);
+  SecondaryIndex? dropEdgeIndex(String name) =>
+      _dropIndex(PropertyOwner.edge, name);
+
+  SecondaryIndex? _dropIndex(PropertyOwner owner, String name) {
+    _rejectIfClosed('dropPropertyIndex');
+    final removed = owner == PropertyOwner.node
+        ? _state.dropNodeIndex(name)
+        : _state.dropEdgeIndex(name);
+    if (removed != null && _sink != null) {
+      _pendingSchemaOps.add(DropIndex(owner: owner, name: name));
+    }
+    return removed;
+  }
 }

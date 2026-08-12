@@ -3,6 +3,16 @@
 # additional rules.
 include: package:lints/recommended.yaml
 
+analyzer:
+  # Strict modes. This is a storage engine: an implicit `dynamic` in the
+  # codec or the property store is how a type confusion reaches disk, so
+  # the analyzer is asked to reject the places the language would
+  # otherwise infer one silently.
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+
 linter:
   rules:
     # Hot-path code prioritises explicit loops over functional sugar.

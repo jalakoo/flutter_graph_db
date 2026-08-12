@@ -39,9 +39,11 @@ schema once, then work in names and raw Dart values. The int-keyed catalog
 and `PropValue` methods below it are the allocation-conscious **hot path**
 (bulk import, inner loops) — reach for them when you measure a need.
 
-Declare the schema once after opening (re-declare on every open — it's a
-non-transactional, idempotent schema op; a type that conflicts with
-persisted data throws):
+Declare the schema once. It's a non-transactional but **journaled**
+idempotent schema op: column type-locks are recorded in the WAL and
+carried in the snapshot, so they survive a restart and re-declaring on
+each open is optional (harmless when the types match, throws when one
+conflicts with persisted data):
 
 ```dart
 final s = db.defineSchema(
@@ -178,10 +180,16 @@ when the presence/type isn't certain.
 ### Find nodes by property
 
 Read-your-writes scans over the labelled set — saves the
-`labelScan` + per-vid compare boilerplate. O(n) in the label; for large
-equality-heavy workloads build a `createNodePropertyIndex` instead — on
-an empty graph (no column yet) pass `IndexSpec(valueType: ColumnType.…)`
-to declare the index ahead of any writes.
+`labelScan` + per-vid compare boilerplate. Allocation-free per row (the
+comparison reads the raw typed column), but still O(n) in the label; for
+large equality-heavy workloads build a `createNodePropertyIndex` instead
+— on an empty graph (no column yet) pass
+`IndexSpec(valueType: ColumnType.…)` to declare the index ahead of any
+writes.
+
+Index declarations are journaled: they come back on the next open with
+their contents rebuilt from the recovered columns, so an index does not
+have to be re-created after a restart.
 
 | Call | Returns | Notes |
 |---|---|---|
@@ -242,7 +250,7 @@ for (final row in result.rows) {
 | `Durability.group` | **Default** — commit lands in the next 1ms group-fsync window. |
 | `Durability.fsync` | Per-commit fsync. Strongest, slowest. |
 | `Durability.periodic` / `Durability.none` | Timer-synced / RAM-only (tests). |
-| `db.state.mergeNow()` | Fold the overlay into the CSR (empties pending writes). Required before `encodeSnapshot`. |
+| `db.mergeNow()` | Fold the overlay into the CSR (empties pending writes). Required before `encodeSnapshot`. |
 | `encodeSnapshot(db.state)` → `.bytes` | Serialize current state. |
 | `compactToCurrentTip(store: store)` | Truncate the WAL after persisting a snapshot. |
 

@@ -47,13 +47,6 @@ class EqualityRange extends IndexKind {
   /// the immutable index footprint on int columns).
   final bool incremental;
 
-  /// Hint to the persistence layer. When
-  /// `priority: high` the index is intended to be persisted
-  /// alongside the engine snapshot so a fresh open does
-  /// not pay the rebuild cost. Default rebuilds on startup. The
-  /// flag is honoured by `IndexSpec.priority`; **the actual
-  /// persistence wiring lands with snapshot integration** and is
-  /// tracked separately.
   const EqualityRange({
     this.hashOverlay = false,
     this.unique = false,
@@ -66,9 +59,15 @@ class EqualityRange extends IndexKind {
       'EqualityRange(hashOverlay: $hashOverlay, unique: $unique)';
 }
 
-/// Persistence priority. `low` (default) rebuilds
-/// on startup; `high` persists alongside the engine snapshot
-/// (snapshot integration is a future enhancement).
+/// Persistence priority.
+///
+/// Index *declarations* are journaled and restored on every open
+/// regardless of this flag — an index no longer disappears on restart.
+/// What `priority` controls is whether the rebuild cost is paid at open:
+/// `low` (default) rebuilds the contents from the recovered columns;
+/// `high` is reserved for persisting the built arrays alongside the
+/// snapshot so a fresh open skips the rebuild. **The `high` fast path is
+/// not implemented yet** — it currently behaves as `low`.
 enum IndexPriority { low, high }
 
 /// Registers an index with the engine. Single-property only in v1
@@ -98,16 +97,36 @@ class IndexSpec {
   /// already-populated column (the default, data-driven path).
   final ColumnType? valueType;
 
+  /// Restricts **unique enforcement** to nodes carrying this label id.
+  /// `null` (default) enforces across every node, regardless of label.
+  ///
+  /// This is how a Neo4j-style `UNIQUE (Label, key)` constraint is
+  /// scoped: `declareConstraint` sets it to the constraint's `labelId`,
+  /// so writing a duplicate value to a node that does *not* carry that
+  /// label is allowed. Before this existed, the auto-created backing
+  /// index was global and rejected such writes.
+  ///
+  /// Only enforcement is scoped — the index itself still covers every
+  /// row of the column, so lookups against it are a superset. That keeps
+  /// the index build label-agnostic (and correct as labels change under
+  /// `SetNodeLabels`) at the cost of scanning the equal range at
+  /// enforcement time.
+  ///
+  /// Meaningless on an edge index; edges carry a type, not labels.
+  final int? labelScope;
+
   const IndexSpec({
     required this.name,
     required this.keyId,
     required this.kind,
     this.priority = IndexPriority.low,
     this.valueType,
+    this.labelScope,
   });
 
   @override
   String toString() =>
       'IndexSpec(name: $name, keyId: $keyId, kind: $kind, '
-      'priority: ${priority.name}, valueType: $valueType)';
+      'priority: ${priority.name}, valueType: $valueType, '
+      'labelScope: $labelScope)';
 }

@@ -32,7 +32,7 @@ dependencies:
   flutter_graph_db:
     git:
       url: https://github.com/<your-org>/flutter_graph_db.git
-      path: flutter_graph_db/packages/flutter_graph_db
+      path: packages/flutter_graph_db
 ```
 
 If you're working on the engine alongside the consuming app, a path
@@ -126,7 +126,7 @@ returns.
 equivalents). Those index straight into the CSR arrays, so they reflect
 only the last merge — the deliberate price of the zero-allocation
 guarantee. `db.hasPendingWrites` tells you when the CSR is stale
-relative to committed writes; call `db.state.mergeNow()` to fold the
+relative to committed writes; call `db.mergeNow()` to fold the
 overlay in (typically <50µs on a small graph) before using that path,
 or just use `forEachOutNeighbor`, which is read-your-writes.
 
@@ -167,11 +167,11 @@ dependencies:
   flutter_graph_db:
     git:
       url: https://github.com/<your-org>/flutter_graph_db.git
-      path: flutter_graph_db/packages/flutter_graph_db
+      path: packages/flutter_graph_db
   graph_db_wal:
     git:
       url: https://github.com/<your-org>/flutter_graph_db.git
-      path: flutter_graph_db/packages/graph_db_wal
+      path: packages/graph_db_wal
   path_provider: ^2.1.0
 ```
 
@@ -239,7 +239,7 @@ Take a snapshot, persist it, and compact the WAL up to the snapshot's
 LSN:
 
 ```dart
-db.state.mergeNow(); // codec invariant: overlay must be empty
+db.mergeNow(); // codec invariant: overlay must be empty
 final snap = encodeSnapshot(db.state);
 await File('${dir.path}/graph.snapshot').writeAsBytes(snap.bytes);
 await compactToCurrentTip(store: store);
@@ -311,10 +311,14 @@ comparison is paste-and-compare.
 
 ## Run the example app
 
-The repo includes a Flutter sample app under `example/` that exercises
-the full public API surface — People / Companies / Graph / Stats tabs,
-real CRUD, WAL-backed persistence, an interactive node-link graph
+The repo includes a Flutter sample app under `example/` — People /
+Companies / Graph / Stats tabs, real CRUD, an interactive node-link graph
 view, and the in-app perf bench.
+
+Note that it depends on `graph_db_core` **only**, and persists via a JSON
+snapshot rather than the WAL. It's a focused engine sample, not a tour of
+this umbrella package: the durable-open, checkpoint, and GQL paths
+documented above are not exercised by it.
 
 ```sh
 cd example

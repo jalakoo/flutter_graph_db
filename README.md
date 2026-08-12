@@ -6,6 +6,15 @@ A pure-Dart, Flutter-native embedded graph database. One in-process
 engine that runs on iOS, Android, macOS, Windows, Linux, and the
 browser (`dart2js` + `dart2wasm`) from the same code path.
 
+> **Web persistence is currently broken.** `graph_db_core` compiles and
+> passes its full suite under `dart2js` (verify with
+> `cd packages/graph_db_core && dart test -p chrome`), but
+> `graph_db_wal` does **not** compile to JS: `package:xxh3` — the WAL
+> record checksum — uses 64-bit integer literals that dart2js rejects.
+> The IndexedDB WAL and snapshot adapters therefore can't be used on web
+> yet, and their browser tests can't run. In-memory use on web is fine.
+> Tracked in CI as a known-failing, non-blocking step.
+
 ## Contents
 
 - [What's in the box](#whats-in-the-box)
@@ -32,7 +41,7 @@ Nine packages plus a Flutter example app.
 | [`graph_db_remote_falkor`](packages/graph_db_remote_falkor) | RESP client adapter for FalkorDB. |
 | [`graph_db_sync`](packages/graph_db_sync) | Push-only sync engine — drains local WAL to remote targets. |
 | [`graph_db_bench`](packages/graph_db_bench) | R-MAT generators + latency / GC-event harness for repeatable perf measurement. |
-| [`example/`](example) | Flutter sample app — Material 3, six tabs, real CRUD, WAL-backed persistence, in-app perf bench. |
+| [`example/`](example) | Flutter sample app — Material 3, four tabs, real CRUD, JSON-snapshot persistence, in-app perf bench. Depends on `graph_db_core` only. |
 
 ## Getting started
 
@@ -45,7 +54,7 @@ dependencies:
   flutter_graph_db:
     git:
       url: https://github.com/jalakoo/flutter_graph_db.git
-      path: flutter_graph_db/packages/flutter_graph_db
+      path: packages/flutter_graph_db
 ```
 
 **Most app code starts with the ergonomic schema tier.** Declare your
@@ -174,9 +183,16 @@ Two complementary views of the public surface:
 
 ## Run the demo
 
-Tour the full public API in a real app — People / Companies / Graph /
-Stats tabs, live CRUD, WAL-backed persistence, an interactive
-node-link view, and the in-app perf bench:
+Tour the engine API in a real app — People / Companies / Graph /
+Stats tabs, live CRUD, an interactive node-link view, and the in-app
+perf bench.
+
+The demo depends on `graph_db_core` alone and persists via a JSON
+snapshot (`path_provider`), not the WAL. That keeps it a focused engine
+sample, but it means it does **not** exercise `graph_db_wal`,
+`graph_db_gql`, or the umbrella package — see
+[`packages/flutter_graph_db/README.md`](packages/flutter_graph_db/README.md)
+for the durable-open and query paths.
 
 ```sh
 cd example
@@ -189,7 +205,9 @@ flutter run
 ```
 flutter_graph_db/
   README.md
-  analysis_options.yaml            ← shared lints baseline
+  LICENSE                          ← MIT
+  pubspec.yaml                     ← pub workspace root
+  analysis_options.yaml            ← shared lints + strict analyzer modes
   packages/
     flutter_graph_db/              ← umbrella package (start here)
     graph_db_core/                 ← engine — CSR, properties, applicator
@@ -203,16 +221,30 @@ flutter_graph_db/
   example/                         ← Flutter demo (iOS / Android / web / desktop)
 ```
 
-Each package resolves independently — no Dart workspace gate. SDK
-floor is Dart 3.5+.
+The repo is a **pub workspace** (`resolution: workspace` in each member).
+One `flutter pub get` at the root resolves every package and the example
+against a single shared `pubspec.lock`. SDK floor is Dart 3.6+ — the
+floor for workspaces.
+
+### Publishing
+
+Not on `pub.dev` yet. Each package carries a `LICENSE`, a `CHANGELOG.md`,
+and `repository` / `issue_tracker` metadata, so
+`dart pub publish --dry-run` is clean for `graph_db_core`. The other
+eight still report their sibling `path:` dependencies, which is inherent
+to a pre-publish monorepo: releasing means publishing in dependency order
+(`core` → `wal` / `gql` / `remote` → adapters → `sync` → umbrella) and
+swapping each `path:` for a version constraint. `publish_to: none` is
+left in place deliberately — flipping it is a release decision, not a
+fix.
 
 ## Tests
 
-Per-package:
+Resolve once at the root, then run any package:
 
 ```sh
+flutter pub get          # once, from the repo root — resolves every member
 cd packages/<name>
-dart pub get
 dart analyze
 dart test
 ```
@@ -220,15 +252,19 @@ dart test
 Full sweep (run from repo root):
 
 ```sh
-for p in packages/*/; do
-  (cd "$p" && dart pub get && dart test)
-done
+flutter pub get
+dart analyze --fatal-infos                 # every member at once
+for p in packages/*/; do (cd "$p" && dart test); done
 cd example && flutter test
 ```
 
-The repo currently runs ~370 unit tests across the nine packages plus
-15 widget tests in the example app. The `graph_db_wal` IDB adapter
-has an additional 5 browser-only tests under `dart test -p chrome`.
+The repo currently runs ~580 unit tests across the nine packages plus
+15 tests in the example app (13 widget + 2 layout).
+
+`graph_db_core` also runs its full suite under `dart2js`
+(`cd packages/graph_db_core && dart test -p chrome`, 296 tests) — that is
+the web-compatibility gate. `graph_db_wal`'s `@TestOn('browser')` suites
+cannot run yet; see the web-persistence note at the top of this file.
 
 ## Performance
 
@@ -295,10 +331,15 @@ caveats).
   floor.
 - **The merge column measures the synchronous main-isolate fold.**
   The bench creates a fresh temp `GraphDb` with no `MergeCoordinator`
-  attached, so the worker-isolate hand-off (~30 µs at 100 k edges
-  when wired) is bypassed in these numbers. Production apps that
-  wire a `MergeCoordinator` get the worker path and don't see this
-  cost on the main thread.
+  attached, so the worker-isolate hand-off is bypassed in these
+  numbers. Production apps that wire a `MergeCoordinator` get the
+  worker path and pay only the copy + pointer-swap install on the main
+  thread. The hand-off cost itself has not been re-measured since the
+  fold started producing the derived arrays — treat any specific figure
+  for it as unbenchmarked.
+- **The table predates the correctness fixes below** (tombstone
+  bookkeeping in the fold, edge-index maintenance). Re-run the bench
+  before quoting these numbers.
 
 ### Reproduce
 
@@ -335,21 +376,38 @@ dart compile exe bin/read_bench.dart -o build/bench && ./build/bench   # AOT
   boxed to `PropValue` only at the public API boundary.
 - **Per-vid delta overlay + worker-isolate merge** — mutations land in
   an overlay; on a size threshold, a background isolate copy-folds it
-  into a fresh CSR and the main isolate installs via pointer swap.
-  Web targets fall back to a synchronous main-isolate fold. **Reads are
-  read-your-writes:** `labelScan`, traversal (`forEachOut/InNeighbor`),
-  `nodeCount` / `edgeCount` / degrees, property reads, and the GQL
-  `MATCH` surface all consult the overlay, so a committed mutation is
-  visible immediately — merge is a pure background-compaction detail,
-  never a correctness step. The allocation-free primitive range API is
-  the one snapshot-of-last-merge exception; `db.hasPendingWrites` reports
-  when it is stale.
+  into a fresh CSR and the main isolate installs it with a pointer swap.
+  The fold produces everything derived from the topology (the `eid →
+  endpoint` maps, the label index, the tombstone bitmap), so install is
+  genuinely O(1) on the main isolate. Web targets fall back to a
+  synchronous main-isolate fold. **Reads are read-your-writes:**
+  `labelScan`, traversal (`forEachOut/InNeighbor`), `nodeCount` /
+  `edgeCount` / degrees, property reads, and the GQL `MATCH` surface all
+  consult the overlay, so a committed mutation is visible immediately —
+  merge is a pure background-compaction detail, never a correctness step.
+  The allocation-free primitive range API is the one
+  snapshot-of-last-merge exception; `db.hasPendingWrites` reports when it
+  is stale.
+- **Deletes are tombstones that outlive a merge** — vids are never
+  reused, so a deleted node keeps its CSR row, marked in
+  `Csr.nodeTombstones`. The bitmap is folded forward by every merge, sent
+  across the worker hand-off, and persisted in the snapshot.
 - **WAL persistence** — CBOR + length-prefix framing + xxHash64
-  checksum per record. Recovery is two-pass redo-with-commit. Three
-  adapters in tree: in-memory, native file (`dart:io`), and IndexedDB.
+  checksum per record. Recovery is a two-pass streaming redo-with-commit
+  (pass 1 collects committed txn ids, pass 2 applies). Three adapters in
+  tree: in-memory, native file (`dart:io`), and IndexedDB. The native
+  adapter is single-file; its compaction stages the retained tail in a
+  temp file and renames it over the WAL, so a crash mid-compact leaves
+  one complete WAL or the other. Rotated 16 MB segments (O(1) compaction)
+  exist only in `SegmentedInMemoryWalStore` so far.
+- **Journaled schema** — column type-locks and secondary-index
+  declarations go through the WAL and are carried in the snapshot, so
+  they survive a restart without being re-declared. Index *contents* are
+  derived and rebuilt on open.
 - **GQL surface** — OpenCypher read-subset via a Dart extension on
   `GraphDb`; planner emits a push-based operator tree with an LRU
   plan cache.
 - **Sync engine** — push-only WAL drain → bulk import to remote
-  targets; per-target HWM + quarantine queue; `fullExport` seeding
-  mode for new targets.
+  targets; quarantine queue; `fullExport` seeding mode for new targets.
+  Per-target high-water marks persist through a `SyncStateStore`, so a
+  restart resumes instead of re-shipping the retained WAL.

@@ -349,7 +349,7 @@ Future<_BenchResult> _runBench(int n) async {
   sw
     ..reset()
     ..start();
-  db.state.mergeNow();
+  db.mergeNow();
   sw.stop();
   final mergeUs = sw.elapsedMicroseconds;
 

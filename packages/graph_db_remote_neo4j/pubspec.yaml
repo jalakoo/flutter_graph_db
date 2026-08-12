@@ -2,23 +2,30 @@ name: graph_db_remote_neo4j
 description: >-
   Bolt-over-Dart adapter for Neo4j (plan §9.1). Separate package so
   consumers only pull in the Bolt dependency when actually targeting
-  Neo4j. Stub — implementation lands in Phase 4.
+  Neo4j.
 publish_to: none
 version: 0.0.1
 
+# Resolved as part of the repo-root pub workspace.
+resolution: workspace
+
+repository: https://github.com/jalakoo/flutter_graph_db/tree/main/packages/graph_db_remote_neo4j
+issue_tracker: https://github.com/jalakoo/flutter_graph_db/issues
+
 environment:
-  sdk: ^3.5.0
+  sdk: ^3.6.0
 
 dependencies:
   graph_db_core:
     path: ../graph_db_core
   graph_db_remote:
     path: ../graph_db_remote
-  # Bolt client choice deferred — per the §13 audit, an existing
-  # community client gets validated in Phase 4 against a real Neo4j 5.x;
-  # if none is production-quality, the package ports the minimal Bolt
-  # subset (~2 weeks of work).
+  # No third-party Bolt client: the protocol subset is implemented in
+  # `lib/src/bolt/` (handshake, chunking, PackStream, messages). Not yet
+  # validated against a live Neo4j 5.x — unit tests cover the codec and
+  # framing only, so treat this adapter as unproven against a real
+  # server.
 
 dev_dependencies:
   test: ^1.24.0
-  lints: ^4.0.0
+  lints: ^6.0.0

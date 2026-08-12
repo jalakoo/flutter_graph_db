@@ -4,11 +4,13 @@
 /// matching [CommitTxn], and replays the surviving ops through the
 /// applicator in `recovery: true` mode.
 ///
-/// **Two-pass.** We buffer the full stream and partition by `txnId`
-/// before replaying — sized for ≤ 100k-edge fixtures, where in-memory
-/// partitioning is the simplest correct shape. Rotated segments +
-/// segment-aligned truncate compose on top; a one-pass streaming scan
-/// with bounded lookahead is the natural next refinement.
+/// **Two-pass, streaming.** Pass 1 scans for committed `txnId`s; pass 2
+/// re-reads and applies. Only the committed-txnId set is held in memory,
+/// so peak usage tracks the number of transactions rather than the size
+/// of the WAL. (It used to buffer every decoded op, which doubled the
+/// cost of a large recovery on top of the state being rebuilt.) The
+/// trade is reading the log twice; a one-pass scan with bounded lookahead
+/// is the natural next refinement.
 library;
 
 import 'dart:typed_data';
@@ -68,17 +70,17 @@ Future<void> recoverInto(
   required WalStore store,
   WalCodec codec = const WalCodec(),
 }) async {
-  final reader = WalReader(store, codec: codec);
-  // First pass: buffer all ops + collect committed txnIds.
-  final ops = <SequencedWalOp>[];
+  // Pass 1 — scan for committed txnIds and the highest LSN. Only the
+  // txnId set is retained, not the ops: buffering every op meant peak
+  // memory scaled with WAL size on top of the state being rebuilt.
   final committed = <int>{};
   var highestLsn = -1;
-  await for (final seq in reader.replay()) {
-    ops.add(seq);
+  await for (final seq in WalReader(store, codec: codec).replay()) {
     if (seq.op is CommitTxn) committed.add(seq.txnId);
     if (seq.lsn > highestLsn) highestLsn = seq.lsn;
   }
-  // Second pass: replay only committed ops in LSN order, skipping any the
+
+  // Pass 2 — re-read and apply only committed ops, skipping any the
   // loaded snapshot already covers. A decoded snapshot restores `nextLsn`
   // to its high-water mark; every WAL op below that floor was folded into
   // the snapshot (and would be dropped by the post-snapshot WAL truncate).
@@ -86,15 +88,27 @@ Future<void> recoverInto(
   // WAL-truncate leaves those covered ops in the WAL, and replaying them
   // re-applies into the overlay on top of the snapshot's CSR — double-
   // counting nodes/edges. For a fresh (no-snapshot) recovery the floor is 0,
-  // so everything replays. The reader already emits in LSN order, but
-  // re-sorting is cheap and defends against future segment-merge shuffling.
+  // so everything replays.
+  //
+  // The reader emits in LSN order (append order within a segment), which
+  // the previous implementation defensively re-sorted. Re-reading rather
+  // than sorting a buffer means that defence is gone, so a future
+  // segment-merge that emits out of order must restore an explicit sort
+  // here — asserted below so it fails loudly rather than corrupting.
   final coveredBelowLsn = state.nextLsn;
-  ops.sort((a, b) => a.lsn.compareTo(b.lsn));
-  for (final seq in ops) {
+  var lastSeenLsn = -1;
+  await for (final seq in WalReader(store, codec: codec).replay()) {
+    assert(
+      seq.lsn > lastSeenLsn,
+      'WAL replay emitted LSN ${seq.lsn} after $lastSeenLsn — recovery '
+      'applies in stream order and requires ascending LSNs',
+    );
+    lastSeenLsn = seq.lsn;
     if (seq.lsn < coveredBelowLsn) continue; // already in the snapshot
     if (!committed.contains(seq.txnId)) continue;
     apply(state, seq, recovery: true);
   }
+
   // The applicator's allocators may have bumped past the committed
   // ops via fast-forward; ensure the LSN counter is just past the
   // highest one we saw, so future appends sit at lsn = highestLsn+1.

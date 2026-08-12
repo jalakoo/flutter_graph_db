@@ -2,12 +2,18 @@ name: graph_db_remote
 description: >-
   `RemoteGraphClient` interface, error hierarchy, and capability flags
   (plan §9). No backend implementations live here — adapters depend on
-  this package. Stub — implementation lands in Phase 4.
+  this package.
 publish_to: none
 version: 0.0.1
 
+# Resolved as part of the repo-root pub workspace.
+resolution: workspace
+
+repository: https://github.com/jalakoo/flutter_graph_db/tree/main/packages/graph_db_remote
+issue_tracker: https://github.com/jalakoo/flutter_graph_db/issues
+
 environment:
-  sdk: ^3.5.0
+  sdk: ^3.6.0
 
 dependencies:
   graph_db_core:
@@ -15,4 +21,4 @@ dependencies:
 
 dev_dependencies:
   test: ^1.24.0
-  lints: ^4.0.0
+  lints: ^6.0.0

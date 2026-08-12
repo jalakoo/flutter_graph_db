@@ -6,8 +6,14 @@ description: >-
 publish_to: none
 version: 0.0.1
 
+# Resolved as part of the repo-root pub workspace.
+resolution: workspace
+
+repository: https://github.com/jalakoo/flutter_graph_db/tree/main/packages/graph_db_core
+issue_tracker: https://github.com/jalakoo/flutter_graph_db/issues
+
 environment:
-  sdk: ^3.5.0
+  sdk: ^3.6.0
 
 dependencies:
   # `Uuid().v7()` for node/edge logicalIds (plan §6.3, §7.4). Pinned
@@ -16,4 +22,4 @@ dependencies:
 
 dev_dependencies:
   test: ^1.24.0
-  lints: ^4.0.0
+  lints: ^6.0.0

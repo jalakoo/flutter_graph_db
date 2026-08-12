@@ -45,10 +45,11 @@ class SyncTarget {
   final SeedingMode seedingMode;
 
   /// LSN of the last op successfully shipped + acknowledged by the
-  /// remote. v1 keeps this in memory; persistence is the next polish
-  /// step (typically alongside engine snapshots — write the HWM into
-  /// the snapshot meta so a recovered engine resumes where it left
-  /// off).
+  /// remote.
+  ///
+  /// Durable when the engine is given a `SyncStateStore` — see
+  /// `SyncEngine.stateStore` and `SyncEngine.restore()`. Without one this
+  /// stays in memory and a restart re-ships the whole retained WAL.
   int hwm = -1;
 
   /// Whether the target has been seeded (no-op for [SeedingMode.incremental]).

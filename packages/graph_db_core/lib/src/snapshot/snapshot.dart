@@ -8,11 +8,13 @@
 /// truncate, this bounds startup cost to one snapshot read + the tail
 /// of the WAL since the snapshot.
 ///
-/// **Scope today:** CSR + node/edge property columns + interner +
-/// constraint catalog. Overlay state is **merged before snapshot**
-/// (clean state — no per-vid deltas to encode); indexes are
-/// rebuilt on read (`priority: high` index persistence is the next
-/// polish step on top of this format).
+/// **Scope today:** CSR (including node tombstones) + node/edge property
+/// columns + interner + constraint catalog + index declarations. Overlay
+/// state is **merged before snapshot** (clean state — no per-vid deltas to
+/// encode). Index *contents* are derived: the declarations round-trip and
+/// each index is rebuilt from the restored columns on decode. Persisting
+/// the built arrays to skip that rebuild (`priority: high`) is the next
+/// polish step on top of this format.
 library;
 
 import 'dart:convert';
@@ -22,8 +24,9 @@ import '../constraints/constraint.dart';
 import '../csr.dart';
 import '../mutable_graph_state.dart';
 import '../property_store.dart';
+import '../secondary_index/index_spec.dart';
 import '../string_interner.dart';
-import '../wal_op.dart' show ConstraintKind;
+import '../wal_op.dart' show ConstraintKind, PropertyOwner;
 
 /// Metadata captured at snapshot time. Persisted by the caller (e.g.
 /// alongside the WAL) so recovery knows the LSN the snapshot was
@@ -56,7 +59,14 @@ const String _kMagic = 'GDBSNAP';
 /// synthesising rows of length 1. Per §19.6 of the multi-label plan
 /// the v1 fallback decode is retained for two minor versions, then
 /// removed.
-const int _kVersion = 2;
+/// **v3** — `'nodeTombstones'` on the `csr` section (sparse: the list of
+/// deleted vids). v1 / v2 snapshots decode with no tombstones, which
+/// matches what they could express — they predate tombstone persistence,
+/// so a node deleted before the snapshot was taken came back on load.
+const int _kVersion = 3;
+
+/// Versions this decoder accepts.
+const Set<int> _kReadableVersions = {1, 2, 3};
 
 /// Encodes [state] into a self-describing JSON blob. The state's
 /// overlay must already be merged (see [MutableGraphState.mergeNow])
@@ -95,10 +105,19 @@ const int _kVersion = 2;
       'labelRowPtr': csr.labelRowPtr.toList(),
       'labels': csr.labels.toList(),
       'edges': _dumpEdges(csr),
+      // v3 — deleted vids, as a sparse ascending list (tombstones are
+      // rare relative to nodeCount, so a bitmap would waste space).
+      // Omitted entirely when nothing is deleted.
+      if (csr.nodeTombstones != null) 'nodeTombstones': _dumpTombstones(csr),
     },
     'nodeProps': _dumpPropertyStore(state.nodeProps),
     'edgeProps': _dumpPropertyStore(state.edgeProps),
     'constraints': _dumpConstraints(state.constraints.all.toList()),
+    // v3 — index declarations. Contents are derived, so only the specs
+    // travel; the decoder rebuilds each index from the restored columns.
+    // Without this a snapshot-only open (WAL fully truncated) came back
+    // with no indexes at all.
+    'indexes': _dumpIndexes(state),
     // Built-in logical-id index, keyed by vid (as a JSON string key).
     'logicalIds': {
       for (final e in state.logicalIdEntries.entries) '${e.key}': e.value,
@@ -123,7 +142,7 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
     throw const FormatException('not a graph_db snapshot');
   }
   final version = root['v'];
-  if (version != _kVersion && version != 1) {
+  if (!_kReadableVersions.contains(version)) {
     throw FormatException('unsupported snapshot version: $version');
   }
   final meta = root['meta']! as Map<String, Object?>;
@@ -190,6 +209,16 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
   for (final l in labels) {
     if (l + 1 > labelCount) labelCount = l + 1;
   }
+  // v3 tombstones. Absent in v1 / v2 — those formats had no way to say a
+  // node was deleted, so they load with every row live.
+  Uint8List? nodeTombstones;
+  final rawTombstones = csrSection['nodeTombstones'] as List?;
+  if (rawTombstones != null && rawTombstones.isNotEmpty) {
+    nodeTombstones = Uint8List(nodeCount);
+    for (final v in rawTombstones.cast<int>()) {
+      if (v < nodeCount) nodeTombstones[v] = 1;
+    }
+  }
   final csr = Csr.fromEdges(
     nodeCount: nodeCount,
     srcs: srcs,
@@ -200,6 +229,7 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
     labels: labels,
     labelCount: labelCount,
     eids: eids,
+    nodeTombstones: nodeTombstones,
   );
 
   // Property stores.
@@ -242,6 +272,18 @@ MutableGraphState decodeSnapshot(Uint8List bytes) {
       state.restoreLogicalId(int.parse(e.key), e.value! as String);
     }
   }
+
+  // v3 index declarations. Rebuilt from the restored columns; absent in
+  // v1 / v2, which simply had no index persistence.
+  final indexes = root['indexes'] as List?;
+  if (indexes != null) {
+    for (final raw in indexes.cast<Map<String, Object?>>()) {
+      final owner = raw['owner'] == 'edge'
+          ? PropertyOwner.edge
+          : PropertyOwner.node;
+      state.applyDeclareIndex(owner, _loadIndexSpec(raw));
+    }
+  }
   return state;
 }
 
@@ -263,6 +305,18 @@ List<String> _dumpInternerSpace(StringInterner s, _InternerKind kind) {
   return [for (var i = 0; i < count; i++) get(i)!];
 }
 
+/// Deleted vids as a sparse ascending list. Sparse rather than a raw
+/// bitmap because tombstones are rare relative to `nodeCount`, and JSON
+/// would spend a character per live node either way.
+List<int> _dumpTombstones(Csr csr) {
+  final t = csr.nodeTombstones!;
+  final out = <int>[];
+  for (var v = 0; v < t.length; v++) {
+    if (t[v] != 0) out.add(v);
+  }
+  return out;
+}
+
 List<Map<String, Object?>> _dumpEdges(Csr csr) {
   final out = <Map<String, Object?>>[];
   for (var v = 0; v < csr.nodeCount; v++) {
@@ -281,7 +335,10 @@ List<Map<String, Object?>> _dumpEdges(Csr csr) {
 
 List<Map<String, Object?>> _dumpPropertyStore(PropertyStore store) {
   final out = <Map<String, Object?>>[];
-  for (final keyId in store.declaredKeyIds) {
+  // Sorted so the encoded form is deterministic for a given state —
+  // makes snapshot bytes comparable across runs in tests.
+  final keyIds = store.columnKeyIds.toList()..sort();
+  for (final keyId in keyIds) {
     final type = store.columnType(keyId)!;
     final pairs = <Map<String, Object?>>[];
     void add(int vid, Object value) {
@@ -332,6 +389,62 @@ PropertyStore _loadPropertyStore(List<Object?> dump, {required int vidSpace}) {
   return store;
 }
 
+List<Map<String, Object?>> _dumpIndexes(MutableGraphState state) {
+  return [
+    for (final e in state.declaredIndexes)
+      {
+        'owner': e.owner.name,
+        'name': e.spec.name,
+        'keyId': e.spec.keyId,
+        'priority': e.spec.priority.name,
+        if (e.spec.valueType != null) 'valueType': e.spec.valueType!.name,
+        if (e.spec.labelScope != null) 'labelScope': e.spec.labelScope,
+        'kind': switch (e.spec.kind) {
+          EqualityRange(
+            :final hashOverlay,
+            :final unique,
+            :final deferred,
+            :final incremental,
+          ) =>
+            {
+              'k': 'EqualityRange',
+              'hashOverlay': hashOverlay,
+              'unique': unique,
+              'deferred': deferred,
+              'incremental': incremental,
+            },
+        },
+      },
+  ];
+}
+
+IndexSpec _loadIndexSpec(Map<String, Object?> raw) {
+  final rawKind = raw['kind']! as Map<String, Object?>;
+  final IndexKind kind = switch (rawKind['k']) {
+    'EqualityRange' => EqualityRange(
+        hashOverlay: rawKind['hashOverlay']! as bool,
+        unique: rawKind['unique']! as bool,
+        deferred: rawKind['deferred']! as bool,
+        incremental: rawKind['incremental']! as bool,
+      ),
+    final other => throw FormatException('unknown IndexKind tag: $other'),
+  };
+  final valueType = raw['valueType'] as String?;
+  return IndexSpec(
+    name: raw['name']! as String,
+    keyId: raw['keyId']! as int,
+    kind: kind,
+    priority: IndexPriority.values.firstWhere(
+      (p) => p.name == raw['priority'],
+      orElse: () => IndexPriority.low,
+    ),
+    valueType: valueType == null
+        ? null
+        : ColumnType.values.firstWhere((t) => t.name == valueType),
+    labelScope: raw['labelScope'] as int?,
+  );
+}
+
 List<Map<String, Object?>> _dumpConstraints(List<ConstraintSpec> specs) {
   return [
     for (final s in specs)
@@ -347,22 +460,4 @@ List<Map<String, Object?>> _dumpConstraints(List<ConstraintSpec> specs) {
   ];
 }
 
-/// Surfaces the per-store keyId iteration — kept here (rather than
-/// on `PropertyStore`) because the snapshot is the only public
-/// consumer. A future polish step may promote this to a `PropertyStore`
-/// public iterator.
-extension on PropertyStore {
-  Iterable<int> get declaredKeyIds sync* {
-    // PropertyStore exposes `columnCount` + `hasColumn(keyId)`;
-    // we use the interner-driven keyId space — the snapshot caller
-    // walks every keyId from 0 to a reasonable upper bound and
-    // skips uncovered ones. For v1 simplicity, we iterate up to a
-    // bounded keyId range. The caller (encodeSnapshot) supplies
-    // the upper bound via the interner's propKeyCount; here we
-    // re-derive by scanning until columnCount holes.
-    for (var k = 0; columnCount > 0 && k < (columnCount + 256); k++) {
-      if (hasColumn(k)) yield k;
-    }
-  }
-}
 

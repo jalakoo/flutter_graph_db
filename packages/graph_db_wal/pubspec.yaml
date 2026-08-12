@@ -1,12 +1,19 @@
 name: graph_db_wal
 description: >-
   WAL schema, CBOR encoding, recovery protocol, and the byte-range
-  `WalStore` port (plan §6). Stub — implementation lands in Phase 2.
+  `WalStore` port (plan §6). Ships in-memory, native (`dart:io`), and
+  IndexedDB adapters for both the WAL and snapshots.
 publish_to: none
 version: 0.0.1
 
+# Resolved as part of the repo-root pub workspace.
+resolution: workspace
+
+repository: https://github.com/jalakoo/flutter_graph_db/tree/main/packages/graph_db_wal
+issue_tracker: https://github.com/jalakoo/flutter_graph_db/issues
+
 environment:
-  sdk: ^3.5.0
+  sdk: ^3.6.0
 
 dependencies:
   graph_db_core:
@@ -23,4 +30,4 @@ dependencies:
 
 dev_dependencies:
   test: ^1.24.0
-  lints: ^4.0.0
+  lints: ^6.0.0
