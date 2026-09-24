@@ -262,4 +262,51 @@ void main() {
       expect(state.csr.hasLabel(0, extra), isTrue);
     });
   });
+
+  // Eids stay sparse across a merge, so an edge re-added after a delete has
+  // an eid past the folded CSR's live edge count. Deleting it — directly or
+  // by deleting a node it touches — used to be refused as an unknown eid.
+  group('deletes against a sparse eid space', () {
+    MutableGraphState churned() {
+      final s = _baseline();
+      s.applyDelEdge(const Eid(0));
+      final e = s.allocEid();
+      s.applyAddEdge(
+        e,
+        logicalId: 'again',
+        src: const Vid(0),
+        dst: const Vid(1),
+        typeId: 0,
+        props: const {},
+      );
+      s.mergeNow();
+      expect(s.csr.edgeCount, 2);
+      expect(e.value, greaterThanOrEqualTo(s.csr.edgeCount));
+      return s;
+    }
+
+    test('an edge whose eid is past the live count can be deleted', () {
+      final s = churned();
+      s.applyDelEdge(const Eid(2));
+      final out = <int>[];
+      s.forEachOutEdge(const Vid(0), (eid, _, __) => out.add(eid.value));
+      expect(out, isEmpty);
+    });
+
+    test('deleting its node cascades to it', () {
+      final s = churned();
+      s.applyDelNode(const Vid(1));
+      final out = <int>[];
+      s.forEachOutEdge(const Vid(0), (eid, _, __) => out.add(eid.value));
+      expect(out, isEmpty);
+    });
+
+    test('a hole in the eid space is still an unknown eid', () {
+      final s = churned();
+      expect(
+        () => s.applyDelEdge(const Eid(0)),
+        throwsA(isA<NotFoundException>()),
+      );
+    });
+  });
 }

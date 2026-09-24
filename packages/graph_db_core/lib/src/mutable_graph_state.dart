@@ -843,6 +843,19 @@ class MutableGraphState implements GraphReadView {
   /// base via [baseCsrEidToSrc] / [baseCsrEidToDst], or the overlay's
   /// [DeltaOverlay.addedEdges]) and records tombstones on both
   /// directions.
+  /// Whether [eid] is a real edge of the base CSR rather than a hole in its
+  /// sparse eid space — a hole maps to `0 -> 0` in the endpoint arrays, so
+  /// the endpoint's own out-slice is the only thing that can tell them apart.
+  bool _baseHoldsEdge(int eid) {
+    final src = baseCsrEidToSrc[eid];
+    if (src >= _csr.nodeCount) return false;
+    final end = _csr.rowPtrOut[src + 1];
+    for (var i = _csr.rowPtrOut[src]; i < end; i++) {
+      if (_csr.edgeIdOut[i] == eid) return true;
+    }
+    return false;
+  }
+
   void applyDelEdge(Eid eid) {
     if (overlay.deletedEdges.contains(eid.value)) return; // idempotent
     final added = overlay.addedEdges[eid.value];
@@ -851,7 +864,10 @@ class MutableGraphState implements GraphReadView {
       _dropEdgeProps(eid.value);
       return;
     }
-    if (eid.value >= csr.edgeCount) {
+    // Bounded by the eid *space*, not by the live edge count: eids stay
+    // sparse across a merge (a folded-away delete leaves a hole), so after
+    // any delete + merge the highest live eid is past `csr.edgeCount`.
+    if (eid.value >= baseCsrEidToSrc.length || !_baseHoldsEdge(eid.value)) {
       throw NotFoundException('DelEdge on unknown eid ${eid.value}');
     }
     final src = baseCsrEidToSrc[eid.value];
